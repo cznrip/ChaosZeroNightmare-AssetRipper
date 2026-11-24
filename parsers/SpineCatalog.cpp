@@ -110,7 +110,7 @@ void SpineCatalog::CollectFiles(const Core::FileNode& node) {
             atlas_files[path] = &node;
         }
     } else {
-        const auto&[folder] = std::get<Core::FolderInfo>(node.data);
+        const auto& folder = std::get<Core::FolderInfo>(node.data).children;
         for (const auto& child : folder) {
             CollectFiles(child);
         }

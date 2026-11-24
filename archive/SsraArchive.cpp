@@ -68,7 +68,7 @@ namespace {
 SsraArchive::SsraArchive(const std::wstring& manifest_path) : manifest_path(manifest_path)
 {
     this->pack_path = manifest_path;
-    this->type = PackType::SSRA;
+    this->type = PackType::Ssra;
     const std::filesystem::path p(manifest_path);
     chunks_dir = (p.parent_path() / L"chunks").wstring();
 }
@@ -86,8 +86,9 @@ std::string SsraArchive::GetStringFromTable(const std::vector<uint8_t>& string_t
     return std::string(str_ptr, len);
 }
 
-void SsraArchive::Scan(std::atomic<float>& progress)
+void SsraArchive::Scan(Core::ProgressReporter progress)
 {
+    BeginTreeBuild("/");
     LogInfo("Scanning SSRA manifest: " + Core::WStringToUtf8(manifest_path));
 
     std::ifstream file(manifest_path, std::ios::binary | std::ios::ate);
@@ -315,14 +316,14 @@ void SsraArchive::Scan(std::atomic<float>& progress)
 
         file_map[clean_path] = s_info;
         file_map[filename] = s_info;
-        AddFileToTree(clean_path, file_entry.chunk_file_off, file_entry.uncomp_sz, 0);
+        AddFileToTree(clean_path, file_entry.chunk_file_off, file_entry.uncomp_sz);
         
         if (i % 100 == 0 || i == header.file_count - 1) {
-            progress = static_cast<float>(i + 1) / header.file_count;
+            progress.Report(static_cast<float>(i + 1) / static_cast<float>(header.file_count));
         }
     }
-    SortTree();
-    progress = 1.0f;
+    FinalizeTree();
+    progress.Complete();
 }
 
 std::vector<uint8_t> SsraArchive::GetFileData(const Core::FileNode& node)

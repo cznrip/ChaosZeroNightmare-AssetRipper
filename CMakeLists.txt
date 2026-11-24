@@ -25,10 +25,10 @@ file(GLOB SPINE_CPP_SOURCES "libs/spine-cpp/src/spine/*.cpp")
 # Sources shared by the GUI and the headless CLI
 set(CZN_CORE_SOURCES
     core/AppSettings.cpp
-    archive/DataPack.cpp
     archive/ArchiveBase.cpp
+    archive/ArchiveFactory.cpp
+    archive/DataPack.cpp
     archive/SsraArchive.cpp
-    archive/CompositeArchive.cpp
     parsers/SctParser.cpp
     parsers/DbParser.cpp
     parsers/ScspParser.cpp

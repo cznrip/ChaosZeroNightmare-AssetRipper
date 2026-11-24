@@ -357,10 +357,9 @@ std::vector<uint8_t> DataPack::GetFileData(const Core::FileNode &node)
     return data;
 }
 
-void DataPack::Scan(std::atomic<float> &progress)
+void DataPack::Scan(Core::ProgressReporter progress)
 {
-    auto &[root] = std::get<Core::FolderInfo>(root_node.data);
-    root.clear();
+    BeginTreeBuild("root");
 
     try
     {
@@ -376,11 +375,11 @@ void DataPack::Scan(std::atomic<float> &progress)
         LogError("Error during scan: " + std::string(e.what()));
     }
 
-    SortTree();
-    progress = 1.0f;
+    FinalizeTree();
+    progress.Complete();
 }
 
-void DataPack::ScanLocalDirectory(std::atomic<float>& progress)
+void DataPack::ScanLocalDirectory(const Core::ProgressReporter& progress)
 {
     const std::filesystem::path base_path(pack_path);
 
@@ -397,10 +396,10 @@ void DataPack::ScanLocalDirectory(std::atomic<float>& progress)
         }
     }
 
-    progress = 1.0f;
+    progress.Complete();
 }
 
-void DataPack::ScanEncrypted(std::atomic<float> &progress)
+void DataPack::ScanEncrypted(const Core::ProgressReporter &progress)
 {
     const auto &key = Core::kDataPackXorKey;
 
@@ -417,8 +416,7 @@ void DataPack::ScanEncrypted(std::atomic<float> &progress)
         {
             if (total_file_size > 0)
             {
-                float p = static_cast<float>(cursor) / static_cast<float>(total_file_size);
-                progress = (p > 1.0f) ? 1.0f : p;
+                progress.Report(static_cast<float>(cursor) / static_cast<float>(total_file_size));
             }
             next_progress_cursor = cursor + progress_interval;
         }
@@ -508,7 +506,7 @@ void DataPack::ScanEncrypted(std::atomic<float> &progress)
     }
 }
 
-void DataPack::ScanDecrypted(std::atomic<float> &progress)
+void DataPack::ScanDecrypted(const Core::ProgressReporter &progress)
 {
     uint64_t cursor = 0;
     uint64_t next_progress_cursor = 0;
@@ -523,8 +521,7 @@ void DataPack::ScanDecrypted(std::atomic<float> &progress)
         {
             if (total_file_size > 0)
             {
-                const float p = static_cast<float>(cursor) / static_cast<float>(total_file_size);
-                progress = (p > 1.0f) ? 1.0f : p;
+                progress.Report(static_cast<float>(cursor) / static_cast<float>(total_file_size));
             }
             next_progress_cursor = cursor + progress_interval;
         }

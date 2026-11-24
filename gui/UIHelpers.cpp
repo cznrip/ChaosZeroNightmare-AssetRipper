@@ -31,7 +31,7 @@ bool has_matching_child(const Core::FileNode &node, const std::string &query)
 
     if (std::holds_alternative<Core::FolderInfo>(node.data))
     {
-        const auto &[folder] = std::get<Core::FolderInfo>(node.data);
+        const auto &folder = std::get<Core::FolderInfo>(node.data).children;
         for (const auto &child : folder)
         {
             if (has_matching_child(child, query))

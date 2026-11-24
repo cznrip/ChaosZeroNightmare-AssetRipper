@@ -7,6 +7,7 @@
 #include "core/Core.hpp"
 #include "core/FileTree.hpp"
 #include "core/FileDialogs.hpp"
+#include "archive/ArchiveFactory.hpp"
 #include "archive/IArchive.hpp"
 #include "gui/AppState.hpp"
 #include "gui/FileBrowserPanel.hpp"
@@ -45,7 +46,7 @@ void draw_toolbar(nk_context *ctx)
                 const std::wstring wpath = Core::Utf8ToWString(selected_path);
                 reset_app_state();
 
-                g_state.browser.data_pack = IArchive::Create(wpath);
+                g_state.browser.data_pack = ArchiveFactory::Open(wpath);
                 if (g_state.browser.data_pack->GetType() == IArchive::PackType::Unknown)
                 {
                     g_state.tasks.status = "Error: Invalid or unknown file.";
@@ -81,7 +82,7 @@ void draw_toolbar(nk_context *ctx)
                     const std::wstring wpath = Core::Utf8ToWString(selected_path);
                     reset_app_state();
 
-                    g_state.browser.data_pack = IArchive::Create(wpath);
+                    g_state.browser.data_pack = ArchiveFactory::Open(wpath);
                     if (g_state.browser.data_pack->GetType() == IArchive::PackType::Unknown)
                     {
                         g_state.tasks.status = "Error: Invalid or unknown folder.";
@@ -124,7 +125,7 @@ void draw_toolbar(nk_context *ctx)
 
             g_state.tasks.future = std::async(std::launch::async, []{
                 try {
-                    g_state.browser.data_pack->Scan(g_state.tasks.progress);
+                    g_state.browser.data_pack->Scan(Core::ProgressReporter::FromAtomic(g_state.tasks.progress));
                 }catch (...) {} });
         }
         catch (const std::exception &e)

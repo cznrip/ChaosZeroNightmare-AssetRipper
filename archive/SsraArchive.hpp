@@ -9,7 +9,7 @@ public:
     explicit SsraArchive(const std::wstring& manifest_path);
     ~SsraArchive() override = default;
 
-    void Scan(std::atomic<float>& progress) override;
+    void Scan(Core::ProgressReporter progress) override;
     std::vector<uint8_t> GetFileData(const Core::FileNode& node) override;
 
 private:

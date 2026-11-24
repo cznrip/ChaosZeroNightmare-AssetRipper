@@ -14,7 +14,7 @@ public:
     DataPack(const DataPack&) = delete;
     DataPack& operator=(const DataPack&) = delete;
 
-    void Scan(std::atomic<float>& progress) override;
+    void Scan(Core::ProgressReporter progress) override;
     std::vector<uint8_t> GetFileData(const Core::FileNode& node) override;
 
 private:
@@ -38,9 +38,9 @@ private:
     // queried once in constructor
     DWORD alloc_granularity = 65536;
 
-    void ScanEncrypted(std::atomic<float>& progress);
-    void ScanDecrypted(std::atomic<float>& progress);
-    void ScanLocalDirectory(std::atomic<float>& progress);
+    void ScanEncrypted(const Core::ProgressReporter& progress);
+    void ScanDecrypted(const Core::ProgressReporter& progress);
+    void ScanLocalDirectory(const Core::ProgressReporter& progress);
 
     static std::vector<std::wstring> FindPackParts(const std::wstring& basePath);
     bool LoadPackPart(const std::wstring& path);

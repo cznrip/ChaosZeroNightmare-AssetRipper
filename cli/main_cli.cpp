@@ -26,6 +26,7 @@
 #include "core/Core.hpp"
 #include "core/FileTree.hpp"
 #include "core/Logger.hpp"
+#include "archive/ArchiveFactory.hpp"
 #include "archive/IArchive.hpp"
 
 // //////////////////////////////////////////////////////////////////////////////////////////////////
@@ -527,7 +528,7 @@ int main(int argc, char** argv)
     LogInfo("CLI run started for pack: " + options.pack);
 
     std::unique_ptr<IArchive> archive;
-    if (!run_guarded([&] { archive = IArchive::Create(pack_path.wstring()); }) || !archive)
+    if (!run_guarded([&] { archive = ArchiveFactory::Open(pack_path); }) || !archive)
     {
         std::cerr << "error: could not open pack: " << options.pack << "\n";
         return CLI_EXIT_PACK_FAILED;
@@ -538,7 +539,7 @@ int main(int argc, char** argv)
     std::cout << "Scanning pack (this can take a while for a full data.pack)...\n";
 
     std::atomic<float> progress = 0.f;
-    if (!run_with_progress("Scanning", progress, [] { return std::string(); }, [&] { archive->Scan(progress); }))
+    if (!run_with_progress("Scanning", progress, [] { return std::string(); }, [&] { archive->Scan(Core::ProgressReporter::FromAtomic(progress)); }))
     {
         std::cerr << "error: scan failed\n";
         return CLI_EXIT_PACK_FAILED;

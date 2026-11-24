@@ -61,7 +61,7 @@ namespace {
         }
         else
         {
-            const auto &[folder] = std::get<Core::FolderInfo>(node.data);
+            const auto &folder = std::get<Core::FolderInfo>(node.data).children;
             j["type"] = "folder";
             j["children"] = nlohmann::ordered_json::array();
             for (const auto &child : folder)
@@ -121,7 +121,7 @@ namespace {
         }
         else
         {
-            const auto &[folder] = std::get<Core::FolderInfo>(node.data);
+            const auto &folder = std::get<Core::FolderInfo>(node.data).children;
             for (const auto &child : folder)
             {
                 navigate_new_tree(child, out_map);
@@ -491,7 +491,7 @@ namespace {
 
             if (std::holds_alternative<Core::FolderInfo>(node.data))
             {
-                const auto &[folder] = std::get<Core::FolderInfo>(node.data);
+                const auto &folder = std::get<Core::FolderInfo>(node.data).children;
                 const bool is_expanded = g_state.browser.selection.expanded_folders.find(&node) != g_state.browser.selection.expanded_folders.end();
                 const bool is_selected = (g_state.browser.selection.selected_nodes.find(&node) != g_state.browser.selection.selected_nodes.end()) || (g_state.browser.selection.selected_node == &node);
 
