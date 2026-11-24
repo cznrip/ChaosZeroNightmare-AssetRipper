@@ -1,437 +1,416 @@
-#include "SsraArchive.hpp"
+#include "archive/SsraArchive.hpp"
+#include "core/BinaryReader.hpp"
+#include "core/Compression.hpp"
 #include "core/Logger.hpp"
-#include "core/Core.hpp"
+#include "core/StringUtils.hpp"
 #include "libs/zstd/zstd.h"
-#include <filesystem>
-#include <fstream>
-#include <iostream>
+
 #include <algorithm>
+#include <filesystem>
+#include <format>
+#include <fstream>
+#include <system_error>
 
 namespace {
-    constexpr uint8_t kZstdMagic = 0x28;
-    constexpr uint8_t kLegacyZstdMagicFirst = 0x25;
-    constexpr uint8_t kLegacyZstdMagicLast = 0x27;
 
-    bool FixLegacyZstdFrame(std::vector<uint8_t>& buffer)
-    {
-        if (buffer.size() < 4 || buffer[1] != 0xB5 || buffer[2] != 0x2F || buffer[3] != 0xFD) {
+    constexpr uint16_t kHotfixGroupId = 0xFFFF;
+    constexpr size_t kHeaderSize = 64;
+    constexpr size_t kChunkEntrySize = 32;
+    constexpr size_t kFileEntrySize = 40;
+    constexpr size_t kGroupEntrySize = 24;
+    constexpr size_t kMaxOpenChunkStreams = 16;
+
+    struct ManifestHeader {
+        uint32_t version = 0;
+        uint32_t unk0 = 0;
+        uint32_t chunk_count = 0;
+        uint32_t file_count = 0;
+        uint32_t flags = 0;
+        uint64_t string_table_offset = 0;
+        uint64_t string_table_size = 0;
+        uint64_t chunk_table_offset = 0;
+        uint64_t file_table_offset = 0;
+        uint64_t extra = 0;
+    };
+
+    bool ParseManifestHeader(Core::BinaryReader& reader, ManifestHeader& out) noexcept {
+        if (!reader.HasBytes(kHeaderSize) || !reader.MatchMagic("SSRA")) {
             return false;
         }
-
-        if (buffer[0] < kLegacyZstdMagicFirst || buffer[0] > kLegacyZstdMagicLast) {
-            return false;
-        }
-        buffer[0] = kZstdMagic;
+        out.version = *reader.TryRead<uint32_t>();
+        out.unk0 = *reader.TryRead<uint32_t>();
+        out.chunk_count = *reader.TryRead<uint32_t>();
+        out.file_count = *reader.TryRead<uint32_t>();
+        out.flags = *reader.TryRead<uint32_t>();
+        out.string_table_offset = *reader.TryRead<uint64_t>();
+        out.string_table_size = *reader.TryRead<uint64_t>();
+        out.chunk_table_offset = *reader.TryRead<uint64_t>();
+        out.file_table_offset = *reader.TryRead<uint64_t>();
+        out.extra = *reader.TryRead<uint64_t>();
         return true;
     }
 
-#pragma pack(push, 1)
-    struct SSRAHeader {
-        char magic[4]; // "SSRA"
-        uint32_t version;
-        uint32_t unk0;
-        uint32_t chunk_count;
-        uint32_t file_count;
-        uint32_t flags;
-        uint64_t string_table_offset;
-        uint64_t string_table_size;
-        uint64_t chunk_table_offset;
-        uint64_t file_table_offset;
-        uint64_t extra;
-    };
-
-    struct SSRAChunkEntry {
-        uint32_t chunk_id;        // 0x00: Chunk ID (e.g. 0, 1, 2, ...)
-        uint16_t group_idx;       // 0x04: Group index (0 = base, 0xFFFF = hotfix)
-        uint16_t unk_06;          // 0x06: Unknown
-        uint64_t uncomp_sz;       // 0x08: Uncompressed size
-        uint64_t comp_sz;         // 0x10: Compressed size
-        uint64_t checksum;        // 0x18: Checksum
-    };
-
-    struct SSRAFileEntry {
-        uint32_t path_hash;       // 0x00: Hash of path
-        uint32_t unk_04;          // 0x04: Unknown
-        uint64_t chunk_file_off;  // 0x08: Offset in chunk file
-        uint32_t comp_sz;         // 0x10: Compressed/raw size in chunk
-        uint32_t uncomp_sz;       // 0x14: Uncompressed size
-        uint32_t unk_18;          // 0x18: Unknown
-        uint32_t name_off;        // 0x1C: Byte offset into string table
-        uint8_t  is_compressed;   // 0x20: 1 = compressed (Zstandard), 0 = uncompressed
-        uint8_t  is_encrypted;    // 0x21: 1 = encrypted (AES-128), 0 = unencrypted
-        uint16_t chunk_idx;       // 0x22: Chunk index
-        uint32_t flags;           // 0x24: Flags (bit 0 = deleted/tombstone)
-    };
-#pragma pack(pop)
-}
-
-SsraArchive::SsraArchive(const std::wstring& manifest_path) : manifest_path(manifest_path)
-{
-    this->pack_path = manifest_path;
-    this->type = PackType::Ssra;
-    const std::filesystem::path p(manifest_path);
-    chunks_dir = (p.parent_path() / L"chunks").wstring();
-}
-
-std::string SsraArchive::GetStringFromTable(const std::vector<uint8_t>& string_table, const uint64_t offset)
-{
-    if (offset >= string_table.size())
-        return {};
-    const auto str_ptr = reinterpret_cast<const char*>(string_table.data() + offset);
-    const size_t max_len = string_table.size() - offset;
-    size_t len = 0;
-    while (len < max_len && str_ptr[len] != '\0') {
-        len++;
+    std::string FormatChunkName(
+        uint16_t group_id,
+        uint32_t chunk_id,
+        const std::unordered_map<uint16_t, std::string>& group_names)
+    {
+        if (group_id == kHotfixGroupId) {
+            return std::format("hotfix_{:04}.ssrc", chunk_id);
+        }
+        if (const auto it = group_names.find(group_id); it != group_names.end() && !it->second.empty()) {
+            return std::format("{}_{:04}.ssrc", it->second, chunk_id);
+        }
+        return std::format("group_{}_{:04}.ssrc", group_id, chunk_id);
     }
-    return std::string(str_ptr, len);
+
+} // namespace
+
+SsraArchive::SsraArchive(const std::wstring& manifest_path)
+    : m_manifest_path(manifest_path)
+{
+    pack_path = manifest_path;
+    type = PackType::Ssra;
+    const std::filesystem::path p(manifest_path);
+    m_chunks_dir = (p.parent_path() / L"chunks").wstring();
 }
 
-void SsraArchive::Scan(Core::ProgressReporter progress)
-{
-    BeginTreeBuild("/");
-    LogInfo("Scanning SSRA manifest: " + Core::WStringToUtf8(manifest_path));
+const SsraArchive::ChunkInfo* SsraArchive::FindChunkForOffset(uint16_t group_id, uint64_t virtual_offset) const noexcept {
+    const auto group_it = m_chunks_by_group.find(group_id);
+    if (group_it == m_chunks_by_group.end() || group_it->second.empty()) {
+        return nullptr;
+    }
 
-    std::ifstream file(manifest_path, std::ios::binary | std::ios::ate);
+    const auto& group_chunks = group_it->second;
+    // First chunk whose global_offset > virtual_offset
+    const auto it = std::ranges::upper_bound(group_chunks, virtual_offset, {}, &ChunkInfo::global_offset);
+    if (it == group_chunks.begin()) {
+        return nullptr;
+    }
+
+    const ChunkInfo& candidate = *std::prev(it);
+    if (virtual_offset >= candidate.global_offset &&
+        virtual_offset < candidate.global_offset + candidate.size_bytes)
+    {
+        return &candidate;
+    }
+    return nullptr;
+}
+
+bool SsraArchive::IsRangeAvailable(uint16_t group_id, uint64_t virtual_offset, uint64_t length) const noexcept {
+    const ChunkInfo* chunk = FindChunkForOffset(group_id, virtual_offset);
+    return chunk != nullptr &&
+           !chunk->physical_path.empty() &&
+           (virtual_offset + length) <= (chunk->global_offset + chunk->size_bytes);
+}
+
+std::ifstream* SsraArchive::GetOrOpenChunkStream(const std::wstring& physical_path) {
+    if (const auto it = m_chunk_streams.find(physical_path); it != m_chunk_streams.end()) {
+        if (it->second.is_open()) {
+            it->second.clear();
+            return &it->second;
+        }
+        m_chunk_streams.erase(it);
+    }
+
+    if (m_chunk_streams.size() >= kMaxOpenChunkStreams) {
+        m_chunk_streams.clear();
+    }
+
+    std::ifstream stream(physical_path, std::ios::binary);
+    if (!stream.is_open()) {
+        return nullptr;
+    }
+
+    auto [it, _] = m_chunk_streams.emplace(physical_path, std::move(stream));
+    return &it->second;
+}
+
+void SsraArchive::Scan(Core::ProgressReporter progress) {
+    BeginTreeBuild("/");
+    m_group_names.clear();
+    m_chunks_by_group.clear();
+    m_file_map.clear();
+    {
+        std::lock_guard lock(m_stream_mutex);
+        m_chunk_streams.clear();
+    }
+
+    LogInfo("Scanning SSRA manifest: " + Core::WStringToUtf8(m_manifest_path));
+
+    std::ifstream file(m_manifest_path, std::ios::binary | std::ios::ate);
     if (!file.is_open()) {
-        LogError("Failed to open manifest.ssra: " + Core::WStringToUtf8(manifest_path));
+        LogError("Failed to open manifest.ssra: " + Core::WStringToUtf8(m_manifest_path));
         return;
     }
 
-    std::streamsize size = file.tellg();
+    const std::streamsize file_size = file.tellg();
     file.seekg(0, std::ios::beg);
-
-    if (size < sizeof(SSRAHeader)) {
+    if (file_size < static_cast<std::streamsize>(kHeaderSize)) {
         LogError("manifest.ssra too small");
         return;
     }
 
-    std::vector<uint8_t> data(size);
-    if (!file.read(reinterpret_cast<char*>(data.data()), size)) {
+    std::vector<uint8_t> data(static_cast<size_t>(file_size));
+    if (!file.read(reinterpret_cast<char*>(data.data()), file_size)) {
         LogError("Failed to read manifest.ssra");
         return;
     }
 
-    SSRAHeader header{};
-    std::memcpy(&header, data.data(), sizeof(SSRAHeader));
-
-    if (std::memcmp(header.magic, "SSRA", 4) != 0) {
-        LogError("Invalid SSRA magic");
+    Core::BinaryReader reader(data);
+    ManifestHeader header{};
+    if (!ParseManifestHeader(reader, header)) {
+        LogError("Invalid SSRA header or magic");
         return;
     }
 
-    // Read string table
-    std::vector<uint8_t> string_table;
-    if (header.string_table_offset + header.string_table_size <= data.size()) {
-        string_table.assign(data.begin() + header.string_table_offset,
-                            data.begin() + header.string_table_offset + header.string_table_size);
+    // String table slice (zero-copy view into manifest buffer)
+    std::span<const uint8_t> string_table;
+    if (header.string_table_offset <= data.size() &&
+        header.string_table_size <= data.size() - header.string_table_offset)
+    {
+        string_table = std::span<const uint8_t>(data).subspan(
+            static_cast<size_t>(header.string_table_offset),
+            static_cast<size_t>(header.string_table_size));
     }
 
-    // Read group table (GRPS) if present after the string table
-    group_names.clear();
-    if (uint64_t grps_offset = header.string_table_offset + header.string_table_size; grps_offset + 16 <= data.size()) {
-        char grps_magic[4];
-        std::memcpy(grps_magic, data.data() + grps_offset, 4);
-        if (std::memcmp(grps_magic, "GRPS", 4) == 0) {
-            uint32_t group_count = *reinterpret_cast<const uint32_t*>(data.data() + grps_offset + 4);
-            uint32_t sec_str_size = *reinterpret_cast<const uint32_t*>(data.data() + grps_offset + 8);
-            uint64_t entries_offset = grps_offset + 16;
-            uint64_t sec_str_offset = entries_offset + (static_cast<uint64_t>(group_count) * 24);
+    // Optional group table (GRPS) immediately following string table
+    const uint64_t grps_offset = header.string_table_offset + header.string_table_size;
+    if (grps_offset <= data.size() && data.size() - grps_offset >= 16 &&
+        reader.MatchesAt(static_cast<size_t>(grps_offset), "GRPS"))
+    {
+        Core::BinaryReader grps_reader(data, static_cast<size_t>(grps_offset) + 4);
+        const uint32_t group_count = *grps_reader.TryRead<uint32_t>();
+        const uint32_t sec_str_size = *grps_reader.TryRead<uint32_t>();
+        const uint64_t entries_offset = grps_offset + 16;
+        const uint64_t sec_str_offset = entries_offset + static_cast<uint64_t>(group_count) * kGroupEntrySize;
 
-            if (sec_str_offset + sec_str_size <= data.size()) {
-                std::vector sec_string_table(
-                    data.begin() + sec_str_offset,
-                    data.begin() + sec_str_offset + sec_str_size
-                );
+        if (sec_str_offset <= data.size() && sec_str_size <= data.size() - sec_str_offset) {
+            const auto sec_strings = std::span<const uint8_t>(data).subspan(
+                static_cast<size_t>(sec_str_offset), sec_str_size);
 
-                for (uint32_t g = 0; g < group_count; ++g) {
-                    uint64_t entry_addr = entries_offset + (g * 24);
-                    uint16_t group_idx = *reinterpret_cast<const uint16_t*>(data.data() + entry_addr);
-                    uint32_t name_off = *reinterpret_cast<const uint32_t*>(data.data() + entry_addr + 4);
-                    if (std::string gname = GetStringFromTable(sec_string_table, name_off); !gname.empty()) {
-                        group_names[group_idx] = gname;
-                        LogInfo("Discovered SSRA group " + std::to_string(group_idx) + " -> '" + gname + "'");
+            for (uint32_t g = 0; g < group_count; ++g) {
+                Core::BinaryReader entry_reader(data, static_cast<size_t>(entries_offset + g * kGroupEntrySize));
+                const uint16_t group_id = *entry_reader.TryRead<uint16_t>();
+                entry_reader.Skip(2);
+                const uint32_t name_off = *entry_reader.TryRead<uint32_t>();
+
+                if (std::string gname = Core::BinaryReader::ReadCString(sec_strings, name_off); !gname.empty()) {
+                    m_group_names[group_id] = gname;
+                    LogInfo(std::format("Discovered SSRA group {} -> '{}'", group_id, gname));
+                }
+            }
+        }
+    }
+
+    // Discover physical .ssrc files on disk once
+    struct PhysicalChunkFile {
+        std::filesystem::path path;
+        std::string filename;
+        uint64_t size = 0;
+    };
+
+    std::vector<PhysicalChunkFile> physical_files;
+    std::unordered_map<uint64_t, std::vector<const PhysicalChunkFile*>> physical_by_size;
+    {
+        std::error_code ec;
+        const std::filesystem::path chunks_path(m_chunks_dir);
+        if (std::filesystem::is_directory(chunks_path, ec) && !ec) {
+            for (const auto& entry : std::filesystem::directory_iterator(chunks_path, ec)) {
+                if (ec) break;
+                if (entry.is_regular_file(ec) && entry.path().extension() == L".ssrc") {
+                    const uint64_t sz = entry.file_size(ec);
+                    if (!ec) {
+                        physical_files.push_back({entry.path(), Core::PathToUtf8(entry.path().filename()), sz});
                     }
                 }
             }
         }
+        for (const auto& pf : physical_files) {
+            physical_by_size[pf.size].push_back(&pf);
+        }
     }
 
-    // Read chunks
-    chunks.clear();
+    // Parse chunk table and group by group_id
     for (uint32_t i = 0; i < header.chunk_count; ++i) {
-        uint64_t entry_off = header.chunk_table_offset + (i * sizeof(SSRAChunkEntry));
-        if (entry_off + sizeof(SSRAChunkEntry) > data.size()) break;
+        const uint64_t entry_off = header.chunk_table_offset + static_cast<uint64_t>(i) * kChunkEntrySize;
+        if (entry_off > data.size() || data.size() - entry_off < kChunkEntrySize) break;
 
-        SSRAChunkEntry chunk_entry{};
-        std::memcpy(&chunk_entry, data.data() + entry_off, sizeof(SSRAChunkEntry));
-
+        Core::BinaryReader entry_reader(data, static_cast<size_t>(entry_off));
         ChunkInfo c_info;
         c_info.index = i;
-        c_info.chunk_id = chunk_entry.chunk_id;
-        c_info.group_idx = chunk_entry.group_idx;
-        char buf[64];
-        if (chunk_entry.group_idx == 0xFFFF) {
-            snprintf(buf, sizeof(buf), "hotfix_%04u.ssrc", chunk_entry.chunk_id);
-        } else {
-            auto it = group_names.find(chunk_entry.group_idx);
-            if (it != group_names.end() && !it->second.empty()) {
-                snprintf(buf, sizeof(buf), "%s_%04u.ssrc", it->second.c_str(), chunk_entry.chunk_id);
-            } else {
-                snprintf(buf, sizeof(buf), "group_%u_%04u.ssrc", chunk_entry.group_idx, chunk_entry.chunk_id);
-            }
-        }
-        c_info.name = buf;
-        c_info.size_bytes = chunk_entry.uncomp_sz;
-        c_info.compressed_size = chunk_entry.comp_sz;
-        c_info.global_offset = 0; // Will compute next
-        chunks.push_back(c_info);
-    }
+        c_info.chunk_id = *entry_reader.TryRead<uint32_t>();
+        c_info.group_id = *entry_reader.TryRead<uint16_t>();
+        entry_reader.Skip(2); // unk_06
+        c_info.size_bytes = *entry_reader.TryRead<uint64_t>();
+        c_info.compressed_size = *entry_reader.TryRead<uint64_t>();
+        // checksum (8 bytes) skipped
 
-    // Compute global offsets per group
-    std::map<uint16_t, std::vector<ChunkInfo*>> group_chunks;
-    for (auto& c : chunks) {
-        group_chunks[c.group_idx].push_back(&c);
-    }
-    
-    for (auto& [grp, list] : group_chunks) {
-        std::sort(list.begin(), list.end(), [](ChunkInfo* a, ChunkInfo* b) {
-            return a->chunk_id < b->chunk_id;
-        });
-        uint64_t current_offset = 0;
-        for (ChunkInfo* c : list) {
-            c->global_offset = current_offset;
-            current_offset += c->size_bytes;
-        }
-    }
+        c_info.name = FormatChunkName(c_info.group_id, c_info.chunk_id, m_group_names);
 
-    const auto chunks_path = std::filesystem::path(chunks_dir);
-    std::vector<std::filesystem::path> physical_files;
-    std::map<uint64_t, std::vector<std::filesystem::path>> physical_files_by_size;
-    if (std::filesystem::is_directory(chunks_path)) {
-        for (const auto& entry : std::filesystem::directory_iterator(chunks_path)) {
-            if (entry.is_regular_file() && entry.path().extension() == L".ssrc") {
-                physical_files.push_back(entry.path());
-                physical_files_by_size[std::filesystem::file_size(entry.path())].push_back(entry.path());
-            }
-        }
-    }
-
-    for (auto& chunk : chunks) {
-        std::vector names = {chunk.name};
-        if (auto group_name = group_names.find(chunk.group_idx); group_name != group_names.end() && !group_name->second.empty()) {
-            char name[64];
-            snprintf(name, sizeof(name), "%s_b%02u_0.ssrc", group_name->second.c_str(), chunk.chunk_id);
-            names.emplace_back(name);
+        // Match physical .ssrc file by candidate name + exact size, or unique size fallback
+        std::vector<std::string> candidate_names = {c_info.name};
+        if (const auto gn = m_group_names.find(c_info.group_id); gn != m_group_names.end() && !gn->second.empty()) {
+            candidate_names.push_back(std::format("{}_b{:02}_0.ssrc", gn->second, c_info.chunk_id));
         }
 
-        for (const auto& physical : physical_files) {
-            const std::string physical_name = Core::PathToUtf8(physical.filename());
-            if (const uint64_t physical_size = std::filesystem::file_size(physical); physical_size != chunk.compressed_size) {
-                continue;
-            }
-            bool name_match = false;
-            for (const auto& name : names) {
-                if (physical_name == name) {
-                    name_match = true;
+        if (const auto by_size = physical_by_size.find(c_info.compressed_size); by_size != physical_by_size.end()) {
+            for (const PhysicalChunkFile* pf : by_size->second) {
+                if (std::ranges::find(candidate_names, pf->filename) != candidate_names.end()) {
+                    c_info.physical_path = pf->path.wstring();
                     break;
                 }
             }
-            if (name_match) {
-                chunk.physical_path = physical.wstring();
-                break;
+            if (c_info.physical_path.empty() && by_size->second.size() == 1) {
+                c_info.physical_path = by_size->second.front()->path.wstring();
             }
         }
 
-        if (chunk.physical_path.empty()) {
-            if (const auto size_match = physical_files_by_size.find(chunk.compressed_size); size_match != physical_files_by_size.end() && size_match->second.size() == 1) {
-                chunk.physical_path = size_match->second.front().wstring();
-            }
+        if (c_info.physical_path.empty()) {
+            LogInfo("Skipping unavailable SSRA chunk: " + c_info.name);
         }
 
-        if (chunk.physical_path.empty()) {
-            LogInfo("Skipping unavailable SSRA chunk: " + chunk.name);
-        }
+        m_chunks_by_group[c_info.group_id].push_back(std::move(c_info));
     }
 
+    // Sort chunks per group by chunk_id and compute contiguous virtual global offsets
     size_t unavailable_chunk_count = 0;
-    for (const auto& chunk : chunks) {
-        if (chunk.physical_path.empty()) {
-            ++unavailable_chunk_count;
+    for (auto& [group_id, list] : m_chunks_by_group) {
+        std::ranges::sort(list, {}, &ChunkInfo::chunk_id);
+        uint64_t running_offset = 0;
+        for (auto& chunk : list) {
+            chunk.global_offset = running_offset;
+            running_offset += chunk.size_bytes;
+            if (chunk.physical_path.empty()) {
+                ++unavailable_chunk_count;
+            }
         }
     }
     if (unavailable_chunk_count != 0) {
         LogInfo("SSRA unavailable chunks skipped: " + std::to_string(unavailable_chunk_count));
     }
 
-    // Read files
-    file_map.clear();
+    // Parse file table using O(log C) chunk availability checks
+    m_file_map.reserve(header.file_count);
     for (uint32_t i = 0; i < header.file_count; ++i) {
-        uint64_t entry_off = header.file_table_offset + (i * sizeof(SSRAFileEntry));
-        if (entry_off + sizeof(SSRAFileEntry) > data.size()) break;
+        const uint64_t entry_off = header.file_table_offset + static_cast<uint64_t>(i) * kFileEntrySize;
+        if (entry_off > data.size() || data.size() - entry_off < kFileEntrySize) break;
 
-        SSRAFileEntry file_entry{};
-        std::memcpy(&file_entry, data.data() + entry_off, sizeof(SSRAFileEntry));
+        Core::BinaryReader entry_reader(data, static_cast<size_t>(entry_off));
+        entry_reader.Skip(8); // path_hash + unk_04
+        const uint64_t virtual_offset = *entry_reader.TryRead<uint64_t>();
+        const uint32_t comp_sz = *entry_reader.TryRead<uint32_t>();
+        const uint32_t uncomp_sz = *entry_reader.TryRead<uint32_t>();
+        entry_reader.Skip(4); // unk_18
+        const uint32_t name_off = *entry_reader.TryRead<uint32_t>();
+        const uint8_t is_compressed = *entry_reader.TryRead<uint8_t>();
+        const uint8_t is_encrypted = *entry_reader.TryRead<uint8_t>();
+        const uint16_t group_id = *entry_reader.TryRead<uint16_t>();
+        const uint32_t flags = *entry_reader.TryRead<uint32_t>();
 
-        bool chunk_available = false;
-        for (const auto& chunk : chunks) {
-            if (chunk.group_idx == file_entry.chunk_idx &&
-                file_entry.chunk_file_off >= chunk.global_offset &&
-                file_entry.chunk_file_off < chunk.global_offset + chunk.size_bytes &&
-                file_entry.chunk_file_off + file_entry.comp_sz <= chunk.global_offset + chunk.size_bytes &&
-                !chunk.physical_path.empty()) {
-                chunk_available = true;
-                break;
-            }
-        }
-        if (!chunk_available) {
-            continue;
-        }
+        // Skip tombstoned/deleted entries
+        if ((flags & 1u) != 0) continue;
 
-        // Skip deleted files
-        if ((file_entry.flags & 1) != 0) {
-            continue;
-        }
+        if (!IsRangeAvailable(group_id, virtual_offset, comp_sz)) continue;
 
-        std::string filename = GetStringFromTable(string_table, file_entry.name_off);
-        if (filename.empty()) {
-            continue;
-        }
+        const std::string raw_name = Core::BinaryReader::ReadCString(string_table, name_off);
+        const std::string clean_path = Core::NormalizeArchivePath(raw_name);
+        if (clean_path.empty()) continue;
 
-        std::string clean_path = filename;
-        if (size_t end = clean_path.find('\0'); end != std::string::npos) clean_path = clean_path.substr(0, end);
-        std::replace(clean_path.begin(), clean_path.end(), '\\', '/');
-        while (!clean_path.empty() && clean_path.back() == '/') clean_path.pop_back();
-        while (!clean_path.empty() && clean_path.front() == '/') clean_path.erase(clean_path.begin());
-        if (clean_path.empty()) {
-            continue;
-        }
-        
-        SSRAFileInfo s_info{};
-        s_info.chunk_index = file_entry.chunk_idx;
-        s_info.offset = file_entry.chunk_file_off;
-        s_info.size = file_entry.uncomp_sz;
-        s_info.compressed_size = file_entry.comp_sz;
-        s_info.is_compressed = (file_entry.is_compressed != 0);
-        s_info.is_encrypted = (file_entry.is_encrypted != 0);
+        m_file_map[clean_path] = FileEntry{
+            .group_id = group_id,
+            .virtual_offset = virtual_offset,
+            .uncompressed_size = uncomp_sz,
+            .compressed_size = comp_sz,
+            .is_compressed = (is_compressed != 0),
+            .is_encrypted = (is_encrypted != 0)
+        };
 
-        file_map[clean_path] = s_info;
-        file_map[filename] = s_info;
-        AddFileToTree(clean_path, file_entry.chunk_file_off, file_entry.uncomp_sz);
-        
-        if (i % 100 == 0 || i == header.file_count - 1) {
+        AddFileToTree(clean_path, virtual_offset, uncomp_sz);
+
+        if (i % 100 == 0 || i + 1 == header.file_count) {
             progress.Report(static_cast<float>(i + 1) / static_cast<float>(header.file_count));
         }
     }
+
     FinalizeTree();
     progress.Complete();
 }
 
-std::vector<uint8_t> SsraArchive::GetFileData(const Core::FileNode& node)
-{
-    if (!std::holds_alternative<Core::FileInfo>(node.data)) {
-        return {};
-    }
+std::vector<uint8_t> SsraArchive::GetFileData(const Core::FileNode& node) {
+    if (!node.IsFile()) return {};
 
-    auto it = file_map.find(node.full_path);
-    if (it == file_map.end()) {
-        std::string alt_path = node.full_path;
-        while (!alt_path.empty() && alt_path.front() == '/') alt_path.erase(alt_path.begin());
-        it = file_map.find(alt_path);
-    }
-    if (it == file_map.end()) {
-        it = file_map.find("/" + node.full_path);
-    }
-    if (it == file_map.end()) {
+    const std::string norm_path = Core::NormalizeArchivePath(node.full_path);
+    const auto it = m_file_map.find(norm_path);
+    if (it == m_file_map.end()) {
         LogError("File not found in SSRA map: " + node.full_path);
         return {};
     }
 
-    const SSRAFileInfo& s_info_orig = it->second;
-    const uint16_t group_idx = s_info_orig.chunk_index; // actually group_idx
-    const uint64_t global_off = s_info_orig.offset;
-    
-    const ChunkInfo* target_chunk = nullptr;
-    for (const auto& c : chunks) {
-        if (c.group_idx == group_idx) {
-            if (global_off >= c.global_offset && global_off < c.global_offset + c.size_bytes) {
-                target_chunk = &c;
-                break;
-            }
-        }
-    }
-    
-    if (!target_chunk) {
-        LogError("Failed to locate chunk for global offset " + std::to_string(global_off) + " in group " + std::to_string(group_idx));
-        return {};
-    }
-
-    const SSRAFileInfo s_info = s_info_orig;
-
-    const size_t read_size = s_info.is_compressed ? s_info.compressed_size : s_info.size;
+    const FileEntry& entry = it->second;
+    const size_t read_size = static_cast<size_t>(entry.is_compressed ? entry.compressed_size : entry.uncompressed_size);
     std::vector<uint8_t> buffer(read_size);
-    std::vector<const ChunkInfo*> group_chunks;
-    for (const auto& chunk : chunks) {
-        if (chunk.group_idx == group_idx) {
-            group_chunks.push_back(&chunk);
-        }
-    }
-    std::sort(group_chunks.begin(), group_chunks.end(), [](const ChunkInfo* left, const ChunkInfo* right) {
-        return left->global_offset < right->global_offset;
-    });
 
-    uint64_t virtual_offset = global_off;
+    uint64_t virtual_offset = entry.virtual_offset;
     size_t bytes_remaining = read_size;
     size_t buffer_offset = 0;
-    while (bytes_remaining != 0) {
-        const ChunkInfo* current_chunk = nullptr;
-        for (const ChunkInfo* chunk : group_chunks) {
-            if (virtual_offset >= chunk->global_offset && virtual_offset < chunk->global_offset + chunk->size_bytes) {
-                current_chunk = chunk;
-                break;
+
+    {
+        std::lock_guard lock(m_stream_mutex);
+        while (bytes_remaining != 0) {
+            const ChunkInfo* current_chunk = FindChunkForOffset(entry.group_id, virtual_offset);
+            if (!current_chunk) {
+                LogError(std::format(
+                    "Failed to locate chunk for virtual offset {} in group {} ({})",
+                    virtual_offset, entry.group_id, node.full_path));
+                return {};
             }
-        }
-        if (current_chunk == nullptr) {
-            LogError("Failed to locate chunk for virtual offset " + std::to_string(virtual_offset) + " in file: " + node.full_path);
-            return {};
-        }
 
-        const uint64_t local_offset = virtual_offset - current_chunk->global_offset;
-        const size_t available = current_chunk->size_bytes - local_offset;
-        const size_t segment_size = (std::min)(bytes_remaining, available);
-        if (current_chunk->physical_path.empty()) {
-            LogError("Failed to locate chunk file for " + current_chunk->name + " and file: " + node.full_path);
-            return {};
-        }
+            if (current_chunk->physical_path.empty()) {
+                LogError(std::format("Unavailable chunk {} for file: {}", current_chunk->name, node.full_path));
+                return {};
+            }
 
-        std::ifstream file(current_chunk->physical_path, std::ios::binary);
-        if (!file.is_open()) {
-            LogError("Failed to open chunk file: " + Core::WStringToUtf8(current_chunk->physical_path));
-            return {};
+            const uint64_t local_offset = virtual_offset - current_chunk->global_offset;
+            const auto available = static_cast<size_t>(current_chunk->size_bytes - local_offset);
+            const size_t segment_size = (std::min)(bytes_remaining, available);
+
+            std::ifstream* stream = GetOrOpenChunkStream(current_chunk->physical_path);
+            if (!stream) {
+                LogError("Failed to open chunk file: " + Core::WStringToUtf8(current_chunk->physical_path));
+                return {};
+            }
+
+            stream->seekg(static_cast<std::streamoff>(local_offset), std::ios::beg);
+            if (!stream->read(reinterpret_cast<char*>(buffer.data() + buffer_offset), static_cast<std::streamsize>(segment_size))) {
+                LogError(std::format("Failed to read data from chunk {} for file: {}", current_chunk->name, node.full_path));
+                return {};
+            }
+
+            virtual_offset += segment_size;
+            buffer_offset += segment_size;
+            bytes_remaining -= segment_size;
         }
-        file.seekg(static_cast<std::streamoff>(local_offset), std::ios::beg);
-        if (!file.read(reinterpret_cast<char*>(buffer.data() + buffer_offset), static_cast<std::streamsize>(segment_size))) {
-            LogError("Failed to read data from chunk " + current_chunk->name + " for file: " + node.full_path);
-            return {};
-        }
-        virtual_offset += segment_size;
-        buffer_offset += segment_size;
-        bytes_remaining -= segment_size;
     }
 
-    if (s_info.is_encrypted) {
-        LogError("Encrypted files are not yet supported for: " + node.full_path);
+    if (entry.is_encrypted) {
+        LogError("Encrypted SSRA files are not yet supported for: " + node.full_path);
         return buffer;
     }
 
-    if (s_info.is_compressed) {
-        const bool legacy_frame = FixLegacyZstdFrame(buffer);
-        std::vector<uint8_t> decompressed(s_info.size);
-        const size_t dSize = ZSTD_decompress(decompressed.data(), decompressed.size(), buffer.data(), buffer.size());
-        if (ZSTD_isError(dSize)) {
-            LogError("ZSTD decompression failed for " + node.full_path + (legacy_frame ? " (legacy frame normalized): " : ": ") + ZSTD_getErrorName(dSize));
+    if (entry.is_compressed) {
+        const bool legacy_frame = Core::NormalizeLegacyZstdFrame(buffer);
+        std::vector<uint8_t> decompressed(static_cast<size_t>(entry.uncompressed_size));
+        const size_t d_size = ZSTD_decompress(decompressed.data(), decompressed.size(), buffer.data(), buffer.size());
+        if (ZSTD_isError(d_size)) {
+            LogError(std::format(
+                "ZSTD decompression failed for {}{}: {}",
+                node.full_path,
+                legacy_frame ? " (legacy frame normalized)" : "",
+                ZSTD_getErrorName(d_size)));
             return buffer;
         }
-        decompressed.resize(dSize);
+        decompressed.resize(d_size);
         return decompressed;
     }
 
