@@ -29,7 +29,7 @@ void reset_app_state()
     g_state.spine.bone_just_reset = false;
     g_state.spine.selected_bone = "";
     if (g_state.spine.viewer)
-        g_state.spine.viewer->unload();
+        g_state.spine.viewer->Unload();
     g_state.spine.viewer.reset();
     g_state.spine.expanded_categories.clear();
     g_state.common.dragging_splitter = false;

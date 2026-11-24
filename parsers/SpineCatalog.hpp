@@ -1,23 +1,24 @@
 #pragma once
-#include "Core.hpp"
-#include <string>
-#include <vector>
-#include <unordered_map>
-#include <map>
+
+#include "core/Core.hpp"
+#include "parsers/ScspParser.hpp"
+
 #include <cstdint>
-#include "ScspParser.hpp"
+#include <map>
+#include <string>
+#include <unordered_map>
+#include <vector>
 
 class IArchive;
 
 struct SpineEntry {
-    std::string name;                    // raw .scsp filename minus extension
-    std::string display_name;            // parent folder name (e.g. "e_terra_underlab_1")
-    std::string category;                // top-level folder (e.g. "spine")
-    const Core::FileNode* scsp_node;     // the .scsp skeleton file
-    const Core::FileNode* atlas_node;    // the matching .atlas file (if found)
+    std::string name;                                       // raw .scsp filename minus extension
+    std::string display_name;                               // display name in catalog
+    std::string category;                                   // normalized parent directory path
+    const Core::FileNode* scsp_node = nullptr;              // .scsp skeleton file
+    const Core::FileNode* atlas_node = nullptr;             // matching .atlas file
     mutable std::vector<const Core::FileNode*> image_nodes; // texture images referenced by atlas
 
-    // Header info extracted from .scsp
     mutable ScspParser::HeaderInfo header_info;
     mutable bool details_loaded = false;
 };
@@ -25,34 +26,37 @@ struct SpineEntry {
 struct SpineCategory {
     std::string name;
     std::string full_path;
-    std::vector<size_t> entry_indices; // indices into flat entries vector
+    std::vector<size_t> entry_indices;
     std::map<std::string, SpineCategory> subcategories;
+    size_t total_entries = 0; // precomputed recursive count
 };
 
+/**
+ * Indexes .scsp skeletons paired with their .atlas files and organizes them
+ * into a hierarchical category tree with lazy detail loading.
+ */
 class SpineCatalog {
 public:
-    void Build(IArchive& pack, const Core::FileNode& root);
+    void Build(IArchive& archive, const Core::FileNode& root);
     void Clear();
-    void EnsureDetailsLoaded(IArchive& pack, const SpineEntry& entry) const;
+    void EnsureDetailsLoaded(IArchive& archive, const SpineEntry& entry) const;
 
-    [[nodiscard]] const std::vector<SpineEntry>& GetEntries() const { return entries; }
-    [[nodiscard]] const SpineCategory& GetRootCategory() const { return root_category; }
-    [[nodiscard]] bool IsBuilt() const { return built; }
+    [[nodiscard]] const std::vector<SpineEntry>& GetEntries() const noexcept { return m_entries; }
+    [[nodiscard]] const SpineCategory& GetRootCategory() const noexcept { return m_root_category; }
+    [[nodiscard]] bool IsBuilt() const noexcept { return m_built; }
 
 private:
     void CollectFiles(const Core::FileNode& node);
     void MatchEntries();
     void BuildCategories();
-
+    static size_t ComputeCategoryCounts(SpineCategory& category) noexcept;
     static std::vector<std::string> ParseAtlasTextureNames(const std::vector<uint8_t>& atlas_data);
-    const Core::FileNode* FindSiblingByName(const std::string& scsp_path, const std::string& filename);
 
-    std::vector<SpineEntry> entries;
-    SpineCategory root_category;
-    bool built = false;
+    std::vector<SpineEntry> m_entries;
+    SpineCategory m_root_category;
+    bool m_built = false;
 
-    // Lookup tables built during scan
-    std::unordered_map<std::string, const Core::FileNode*> scsp_files;
-    std::unordered_map<std::string, const Core::FileNode*> atlas_files;
-    std::unordered_map<std::string, const Core::FileNode*> all_files;
+    std::unordered_map<std::string, const Core::FileNode*> m_scsp_files;
+    std::unordered_map<std::string, const Core::FileNode*> m_atlas_files;
+    std::unordered_map<std::string, const Core::FileNode*> m_all_files;
 };

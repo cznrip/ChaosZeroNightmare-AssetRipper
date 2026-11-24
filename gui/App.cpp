@@ -194,9 +194,9 @@ void App::ProcessEvents() {
                         {
                             if (!g_state.spine.viewer)
                                 g_state.spine.viewer = std::make_unique<SpineViewer>();
-                            g_state.spine.viewer->loadSkeleton(g_state.spine.catalog, *g_state.browser.data_pack, entries[g_state.spine.selected_index]);
-                            g_state.spine.viewer->setFlipX(g_state.spine.flip_x);
-                            g_state.spine.viewer->setFlipY(g_state.spine.flip_y);
+                            g_state.spine.viewer->LoadSkeleton(g_state.spine.catalog, *g_state.browser.data_pack, entries[g_state.spine.selected_index]);
+                            g_state.spine.viewer->SetFlipX(g_state.spine.flip_x);
+                            g_state.spine.viewer->SetFlipY(g_state.spine.flip_y);
                             g_state.spine.selected_animation = 0;
                             g_state.spine.selected_skin = 0;
                             g_state.spine.last_tick = 0;
@@ -210,7 +210,7 @@ void App::ProcessEvents() {
                     {
                         if (!g_state.spine.viewer)
                             g_state.spine.viewer = std::make_unique<SpineViewer>();
-                        g_state.spine.viewer->loadSkeleton(g_state.spine.catalog, *g_state.browser.data_pack, entries[g_state.spine.selected_index]);
+                        g_state.spine.viewer->LoadSkeleton(g_state.spine.catalog, *g_state.browser.data_pack, entries[g_state.spine.selected_index]);
                         g_state.spine.selected_animation = 0;
                         g_state.spine.selected_skin = 0;
                         g_state.spine.last_tick = 0;

@@ -1,225 +1,253 @@
 #pragma once
 
+#include "gui/GlResources.hpp"
+
 #include <GL/glew.h>
 #include <spine/spine.h>
-#include <string>
+
+#include <array>
 #include <map>
+#include <memory>
 #include <set>
+#include <span>
+#include <string>
 #include <vector>
 
 class IArchive;
 struct SpineEntry;
 class SpineCatalog;
 
-// Custom texture loader that uses pre-registered GL textures
-class PackTextureLoader : public spine::TextureLoader {
+// Custom texture loader backed by pre-registered OpenGL textures.
+class SpineTextureLoader final : public spine::TextureLoader {
 public:
-    void registerTexture(const std::string& name, GLuint textureId, int width, int height);
+    struct TexInfo {
+        GLuint id = 0;
+        int width = 0;
+        int height = 0;
+    };
+
+    void RegisterTexture(const std::string& name, GLuint texture_id, int width, int height);
     void load(spine::AtlasPage& page, const spine::String& path) override;
     void unload(void* texture) override;
-    void clearTextures();
+    void ClearTextures();
 
-    struct TexInfo { GLuint id; int width; int height; };
-    [[nodiscard]] const std::map<std::string, TexInfo>& getTextures() const { return textures; }
+    [[nodiscard]] const std::map<std::string, TexInfo>& GetTextures() const noexcept { return m_textures; }
 
 private:
-    std::map<std::string, TexInfo> textures;
+    std::map<std::string, TexInfo> m_textures;
 };
 
-// Minimal GL3.3 2D batch renderer for spine
+// Minimal GL 3.3 2D batch renderer for Spine attachments and gizmos.
 class SpineBatchRenderer {
 public:
-    SpineBatchRenderer();
-    ~SpineBatchRenderer();
+    SpineBatchRenderer() = default;
+    ~SpineBatchRenderer() { Dispose(); }
 
-    void init();
-    void dispose();
-    void begin(float projMatrix[16], bool pma = true);
-    void addTriangles(GLuint texture, const float* vertices, int vertexCount, const unsigned short* indices, int indexCount, spine::BlendMode blendMode);
-    void end();
+    SpineBatchRenderer(const SpineBatchRenderer&) = delete;
+    SpineBatchRenderer& operator=(const SpineBatchRenderer&) = delete;
+
+    void Init();
+    void Dispose();
+    void Begin(const std::array<float, 16>& proj_matrix, bool pma = true);
+    void AddTriangles(
+        GLuint texture,
+        std::span<const float> vertices,
+        int vertex_count,
+        std::span<const unsigned short> indices,
+        spine::BlendMode blend_mode);
+    void End();
 
 private:
     struct Vertex {
         float x, y, u, v, r, g, b, a;
     };
 
-    void flush();
+    void Flush();
 
-    GLuint shaderProgram = 0;
-    GLuint vao = 0, vbo = 0, ibo = 0;
-    GLint projLoc = -1, texLoc = -1;
+    Gfx::GlShaderProgram m_shader_program;
+    Gfx::GlVertexArray m_vao;
+    Gfx::GlBuffer m_vbo;
+    Gfx::GlBuffer m_ibo;
+    GLint m_proj_loc = -1;
+    GLint m_tex_loc = -1;
 
-    std::vector<Vertex> batchVertices;
-    std::vector<unsigned short> batchIndices;
-    GLuint currentTexture = 0;
-    spine::BlendMode currentBlend = spine::BlendMode_Normal;
-    float currentProj[16] = {};
-    bool currentPMA = true;
-    bool initialized = false;
+    std::vector<Vertex> m_batch_vertices;
+    std::vector<unsigned short> m_batch_indices;
+    GLuint m_current_texture = 0;
+    spine::BlendMode m_current_blend = spine::BlendMode_Normal;
+    std::array<float, 16> m_current_proj{};
+    bool m_current_pma = true;
+    bool m_initialized = false;
 };
 
-// Bone edit override — stores all editable bone properties
 struct BoneOverride {
-    float x = 0, y = 0;
-    float rotation = 0;
-    float scaleX = 1.0f, scaleY = 1.0f;
-    float shearX = 0, shearY = 0;
+    float x = 0.0f, y = 0.0f;
+    float rotation = 0.0f;
+    float scale_x = 1.0f, scale_y = 1.0f;
+    float shear_x = 0.0f, shear_y = 0.0f;
 };
 
-// Main Spine viewer class
 class SpineViewer {
 public:
-    SpineViewer();
-    ~SpineViewer();
-
-    bool loadSkeleton(const SpineCatalog& dict, IArchive& pack, const SpineEntry& entry);
-    void unload();
-    void update(float deltaTime);
-    void render(int viewportWidth, int viewportHeight);
-
-    [[nodiscard]] GLuint getFBOTexture() const { return fboTexture; }
-    [[nodiscard]] bool isLoaded() const { return skeleton != nullptr; }
-
-    // Animation/skin
-    [[nodiscard]] std::vector<std::string> getAnimationNames() const;
-    [[nodiscard]] std::vector<std::string> getSkinNames() const;
-    void setAnimation(const std::string& name, bool loop = true);
-    void setSkin(const std::string& name) const;
-
-    // Playback
-    void setPlaybackSpeed(float speed) { playbackSpeed = speed; }
-    void setPlaying(bool p) { playing = p; }
-    [[nodiscard]] bool isPlaying() const { return playing; }
-    [[nodiscard]] float getPlaybackSpeed() const { return playbackSpeed; }
-
-    // View
-    void setFlipX(const bool flip) { flipX = flip; }
-    void setFlipY(const bool flip) { flipY = flip; }
-
-    // Blend config
-    void setUsePMA(const bool pma) { usePMA = pma; }
-    [[nodiscard]] bool getUsePMA() const { return usePMA; }
-    void setPremultiplyTextures(bool pm) { premultiplyTextures = pm; reloadTextures = true; }
-    [[nodiscard]] bool getPremultiplyTextures() const { return premultiplyTextures; }
-    [[nodiscard]] bool needsTextureReload() const { return reloadTextures; }
-
-    // Autoplay
-    void nextAnimation();
-    [[nodiscard]] int getCurrentAnimIndex() const { return currentAnimIndex; }
-    void setAutoplayNext(bool a) { autoplayNext = a; }
-    [[nodiscard]] bool getAutoplayNext() const { return autoplayNext; }
-    [[nodiscard]] bool getFlipX() const { return flipX; }
-    [[nodiscard]] bool getFlipY() const { return flipY; }
-    void setZoom(float z) { zoom = z; if (zoom < 0.1f) zoom = 0.1f; if (zoom > 10.0f) zoom = 10.0f; }
-    [[nodiscard]] float getZoom() const { return zoom; }
-    void zoomBy(const float factor) { zoom *= factor; if (zoom < 0.1f) zoom = 0.1f; if (zoom > 10.0f) zoom = 10.0f; }
-    void pan(const float dx, const float dy) { panX += dx; panY += dy; }
-    void resetView() { zoom = 1.0f; panX = 0; panY = 0; }
-    [[nodiscard]] float getPanX() const { return panX; }
-    [[nodiscard]] float getPanY() const { return panY; }
-    [[nodiscard]] std::string getError() const { return errorMsg; }
-
-    // Viewport background color
-    void setBgColor(const float r, const float g, const float b) { bgR = r; bgG = g; bgB = b; }
-    void getBgColor(float& r, float& g, float& b) const { r = bgR; g = bgG; b = bgB; }
-
-    // Bone editing
     struct BoneInfo {
         std::string name;
-        std::string parentName;
-        int depth = 0; // 0 = root, 1 = child, etc.
-        // Override values (what the user edits — stable, not affected by animation)
-        float x, y, rotation, scaleX, scaleY, shearX, shearY;
-        // Original setup pose (for reset)
-        float setupX, setupY, setupRot, setupSX, setupSY, setupShX, setupShY;
-        // Current animated values (read-only, changes each frame)
-        float animX, animY, animRot, animSX, animSY, animShX, animShY;
-        bool hasOverride;
-        bool hidden;
+        std::string parent_name;
+        int depth = 0;
+        // Editable values (override if edited, otherwise setup pose)
+        float x = 0, y = 0, rotation = 0, scale_x = 1, scale_y = 1, shear_x = 0, shear_y = 0;
+        // Original setup pose
+        float setup_x = 0, setup_y = 0, setup_rot = 0, setup_sx = 1, setup_sy = 1, setup_shx = 0, setup_shy = 0;
+        // Current live animated values
+        float anim_x = 0, anim_y = 0, anim_rot = 0, anim_sx = 1, anim_sy = 1, anim_shx = 0, anim_shy = 0;
+        bool has_override = false;
+        bool hidden = false;
     };
-    [[nodiscard]] std::vector<BoneInfo> getBoneList() const;
-    void setBoneOverride(const std::string& boneName, const BoneOverride& ovr);
-    void resetBone(const std::string& boneName);
-    void resetBoneEdits();
-    [[nodiscard]] bool hasBoneOverrides() const { return !boneOverrides.empty(); }
-    [[nodiscard]] const std::map<std::string, BoneOverride>& getBoneOverrides() const { return boneOverrides; }
-    void toggleBoneHidden(const std::string& boneName);
-    [[nodiscard]] bool isBoneHidden(const std::string& boneName) const;
 
-    // Hit testing — returns bone name or empty string
-    std::string hitTestBone(float screenX, float screenY, int vpW, int vpH);
-    int selectedBoneIndex = -1;
-
-    // Transform gizmo
     enum class GizmoHandle { None, Move, ScaleTL, ScaleTR, ScaleBL, ScaleBR, Rotate };
+
     struct GizmoState {
-        float bboxMinX{}, bboxMinY{}, bboxMaxX{}, bboxMaxY{}; // world-space bounding box
+        float bbox_min_x = 0, bbox_min_y = 0, bbox_max_x = 0, bbox_max_y = 0;
         bool valid = false;
     };
-    [[nodiscard]] GizmoState getSelectedBoneGizmo() const;
-    [[nodiscard]] GizmoHandle hitTestGizmo(float screenX, float screenY, int vpW, int vpH) const;
 
-    // Texture info and swap
-    struct TextureInfo { std::string name; int width; int height; GLuint glId; };
-    [[nodiscard]] std::vector<TextureInfo> getTextureList() const;
-    bool swapTexture(const std::string& pageName, const std::string& pngPath);
-    void resetTextureSwaps();
-    [[nodiscard]] bool hasTextureSwaps() const { return !textureSwaps.empty(); }
+    struct TextureInfo {
+        std::string name;
+        int width = 0;
+        int height = 0;
+        GLuint gl_id = 0;
+    };
 
-    // Export modified JSON
-    [[nodiscard]] std::string getModifiedSkeletonJson() const;
+    SpineViewer() = default;
+    ~SpineViewer();
 
-private:
-    void ensureFBO(int width, int height);
-    void cleanupFBO();
-    GLuint loadTextureFromRGBA(const unsigned char* data, int width, int height);
-    void computeStableBounds();
-    void screenToWorld(float sx, float sy, int vpW, int vpH, float& wx, float& wy) const;
-    void applyBoneOverrides();
+    SpineViewer(const SpineViewer&) = delete;
+    SpineViewer& operator=(const SpineViewer&) = delete;
 
-    // Spine objects
-    PackTextureLoader textureLoader;
-    spine::Atlas* atlas = nullptr;
-    spine::SkeletonData* skeletonData = nullptr;
-    spine::Skeleton* skeleton = nullptr;
-    spine::AnimationStateData* stateData = nullptr;
-    spine::AnimationState* animState = nullptr;
-    spine::SkeletonClipping clipper;
+    bool LoadSkeleton(const SpineCatalog& catalog, IArchive& archive, const SpineEntry& entry);
+    void Unload();
+    void Update(float delta_time);
+    void Render(int viewport_width, int viewport_height);
 
-    SpineBatchRenderer batchRenderer;
+    [[nodiscard]] GLuint GetFboTexture() const noexcept { return m_fbo_texture.Id(); }
+    [[nodiscard]] bool IsLoaded() const noexcept { return m_skeleton != nullptr; }
 
-    // FBO
-    GLuint fbo = 0, fboTexture = 0;
-    int fboWidth = 0, fboHeight = 0;
+    // Animation / skin
+    [[nodiscard]] std::vector<std::string> GetAnimationNames() const;
+    [[nodiscard]] std::vector<std::string> GetSkinNames() const;
+    void SetAnimation(const std::string& name, bool loop = true);
+    void SetSkin(const std::string& name) const;
+    void NextAnimation();
+    [[nodiscard]] int GetCurrentAnimIndex() const noexcept { return m_current_anim_index; }
 
-    float playbackSpeed = 1.0f;
-    bool playing = true;
-    bool flipX = false;
-    bool flipY = false;
-    float zoom = 1.0f;
-    float panX = 0, panY = 0;
-    bool usePMA = true;
-    bool premultiplyTextures = false; // ASTC source textures are already PMA — don't re-premultiply
-    bool reloadTextures = false;
-    bool autoplayNext = false;
-    int currentAnimIndex = 0;
-    std::string errorMsg;
-    float bgR = 0, bgG = 0, bgB = 0; // viewport background (default transparent black)
+    // Playback & view
+    void SetPlaybackSpeed(float speed) noexcept { m_playback_speed = speed; }
+    [[nodiscard]] float GetPlaybackSpeed() const noexcept { return m_playback_speed; }
+    void SetPlaying(bool playing) noexcept { m_playing = playing; }
+    [[nodiscard]] bool IsPlaying() const noexcept { return m_playing; }
+    void SetAutoplayNext(bool autoplay) noexcept { m_autoplay_next = autoplay; }
+    [[nodiscard]] bool GetAutoplayNext() const noexcept { return m_autoplay_next; }
+    void SetFlipX(bool flip) noexcept { m_flip_x = flip; }
+    void SetFlipY(bool flip) noexcept { m_flip_y = flip; }
+    [[nodiscard]] bool GetFlipX() const noexcept { return m_flip_x; }
+    [[nodiscard]] bool GetFlipY() const noexcept { return m_flip_y; }
+    void SetUsePma(bool pma) noexcept { m_use_pma = pma; }
+    [[nodiscard]] bool GetUsePma() const noexcept { return m_use_pma; }
+    void SetPremultiplyTextures(bool pm) noexcept { m_premultiply_textures = pm; m_reload_textures = true; }
+    [[nodiscard]] bool GetPremultiplyTextures() const noexcept { return m_premultiply_textures; }
+    [[nodiscard]] bool NeedsTextureReload() const noexcept { return m_reload_textures; }
 
-    // Cached bounds
-    float cachedBoundsX = 0, cachedBoundsY = 0, cachedBoundsW = 0, cachedBoundsH = 0;
-    bool boundsComputed = false;
+    void SetZoom(float z) noexcept;
+    [[nodiscard]] float GetZoom() const noexcept { return m_zoom; }
+    void ZoomBy(float factor) noexcept { SetZoom(m_zoom * factor); }
+    void Pan(float dx, float dy) noexcept { m_pan_x += dx; m_pan_y += dy; }
+    void ResetView() noexcept { m_zoom = 1.0f; m_pan_x = 0.0f; m_pan_y = 0.0f; }
+    [[nodiscard]] float GetPanX() const noexcept { return m_pan_x; }
+    [[nodiscard]] float GetPanY() const noexcept { return m_pan_y; }
+    [[nodiscard]] const std::string& GetError() const noexcept { return m_error_msg; }
+
+    void SetBgColor(float r, float g, float b) noexcept { m_bg_r = r; m_bg_g = g; m_bg_b = b; }
+    void GetBgColor(float& r, float& g, float& b) const noexcept { r = m_bg_r; g = m_bg_g; b = m_bg_b; }
 
     // Bone editing
-    std::map<std::string, BoneOverride> boneOverrides;
-    std::set<std::string> hiddenBones;
+    [[nodiscard]] std::vector<BoneInfo> GetBoneList() const;
+    void SetBoneOverride(const std::string& bone_name, const BoneOverride& ovr);
+    void ResetBone(const std::string& bone_name);
+    void ResetBoneEdits();
+    [[nodiscard]] bool HasBoneOverrides() const noexcept { return !m_bone_overrides.empty(); }
+    [[nodiscard]] const std::map<std::string, BoneOverride>& GetBoneOverrides() const noexcept { return m_bone_overrides; }
+    void ToggleBoneHidden(const std::string& bone_name);
+    [[nodiscard]] bool IsBoneHidden(const std::string& bone_name) const;
 
-    // Texture swaps (page name → replacement file path)
-    std::map<std::string, std::string> textureSwaps;
-    std::vector<GLuint> swappedTextures; // GL textures to clean up
+    // Selection & gizmo
+    std::string HitTestBone(float screen_x, float screen_y, int vp_w, int vp_h);
+    [[nodiscard]] GizmoState GetSelectedBoneGizmo() const;
+    [[nodiscard]] GizmoHandle HitTestGizmo(float screen_x, float screen_y, int vp_w, int vp_h) const;
+    void SetSelectedBoneIndex(int index) noexcept { m_selected_bone_index = index; }
+    [[nodiscard]] int GetSelectedBoneIndex() const noexcept { return m_selected_bone_index; }
 
-    // Original JSON for export
-    std::string originalJson;
+    // Textures
+    [[nodiscard]] std::vector<TextureInfo> GetTextureList() const;
+    bool SwapTexture(const std::string& page_name, const std::string& png_path);
+    void ResetTextureSwaps() { m_texture_swaps.clear(); }
+    [[nodiscard]] bool HasTextureSwaps() const noexcept { return !m_texture_swaps.empty(); }
 
-    std::vector<GLuint> ownedTextures;
+    // Export
+    [[nodiscard]] std::string GetModifiedSkeletonJson() const;
+
+private:
+    void EnsureFbo(int width, int height);
+    void CleanupFbo();
+    GLuint LoadTextureFromRgba(const unsigned char* data, int width, int height);
+    void EnsureGizmoTexture();
+    void ComputeStableBounds();
+    void ScreenToWorld(float sx, float sy, int vp_w, int vp_h, float& wx, float& wy) const noexcept;
+    void ApplyBoneOverrides();
+    void RenderSelectedBoneGizmo();
+
+    SpineTextureLoader m_texture_loader;
+    std::unique_ptr<spine::Atlas> m_atlas;
+    std::unique_ptr<spine::SkeletonData> m_skeleton_data;
+    std::unique_ptr<spine::Skeleton> m_skeleton;
+    std::unique_ptr<spine::AnimationStateData> m_state_data;
+    std::unique_ptr<spine::AnimationState> m_anim_state;
+    spine::SkeletonClipping m_clipper;
+
+    SpineBatchRenderer m_batch_renderer;
+
+    Gfx::GlFramebuffer m_fbo;
+    Gfx::GlTexture m_fbo_texture;
+    Gfx::GlTexture m_gizmo_texture;
+    int m_fbo_width = 0;
+    int m_fbo_height = 0;
+
+    // Reusable per-frame scratch buffers (avoids function-local statics and fixed limits)
+    mutable std::vector<float> m_world_vertices;
+    std::vector<float> m_mesh_vertices;
+
+    float m_playback_speed = 1.0f;
+    bool m_playing = true;
+    bool m_flip_x = false;
+    bool m_flip_y = false;
+    float m_zoom = 1.0f;
+    float m_pan_x = 0.0f;
+    float m_pan_y = 0.0f;
+    bool m_use_pma = true;
+    bool m_premultiply_textures = false;
+    bool m_reload_textures = false;
+    bool m_autoplay_next = false;
+    int m_current_anim_index = 0;
+    int m_selected_bone_index = -1;
+    std::string m_error_msg;
+    float m_bg_r = 0.0f, m_bg_g = 0.0f, m_bg_b = 0.0f;
+
+    float m_cached_bounds_x = 0.0f, m_cached_bounds_y = 0.0f;
+    float m_cached_bounds_w = 0.0f, m_cached_bounds_h = 0.0f;
+    bool m_bounds_computed = false;
+
+    std::map<std::string, BoneOverride> m_bone_overrides;
+    std::set<std::string> m_hidden_bones;
+    std::map<std::string, std::string> m_texture_swaps;
+    std::string m_original_json;
+
+    std::vector<Gfx::GlTexture> m_owned_textures;
 };

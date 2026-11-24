@@ -1,127 +1,39 @@
-#include "SpineCatalog.hpp"
+#include "parsers/SpineCatalog.hpp"
 #include "archive/IArchive.hpp"
-#include "ScspParser.hpp"
+#include "core/AssetFormat.hpp"
 #include "core/Logger.hpp"
+#include "core/StringUtils.hpp"
+
 #include <algorithm>
+#include <format>
 #include <sstream>
-#include <set>
-
-namespace {
-    std::string get_extension(const std::string& name) {
-        const size_t dot = name.find_last_of('.');
-        if (dot == std::string::npos) return "";
-        return Core::ToLower(name.substr(dot));
-    }
-
-    std::string strip_extension(const std::string& name) {
-        const size_t dot = name.find_last_of('.');
-        if (dot == std::string::npos) return name;
-        return name.substr(0, dot);
-    }
-
-    std::string get_directory(const std::string& path) {
-        const size_t sep = path.find_last_of('/');
-        if (sep == std::string::npos) return "";
-        return path.substr(0, sep);
-    }
-
-    std::string get_basename(const std::string& path) {
-        const size_t sep = path.find_last_of('/');
-        if (sep == std::string::npos) return path;
-        return path.substr(sep + 1);
-    }
-
-    std::string get_first_component(const std::string& path) {
-        const size_t sep = path.find('/');
-        if (sep == std::string::npos) return path;
-        return path.substr(0, sep);
-    }
-
-    std::string normalize_path(const std::string& path) {
-        std::string result = path;
-        for (auto& c : result) {
-            if (c == '\\') c = '/';
-        }
-        return result;
-    }
-
-    std::vector<std::string> split_path(const std::string& path) {
-        std::vector<std::string> parts;
-        std::istringstream ss(path);
-        std::string part;
-        while (std::getline(ss, part, '/')) {
-            if (!part.empty()) parts.push_back(part);
-        }
-        return parts;
-    }
-
-    bool is_image_extension(const std::string& name) {
-        const std::string ext = get_extension(name);
-        return ext == ".sct" || ext == ".sct2" || ext == ".png" || ext == ".jpg"
-            || ext == ".jpeg" || ext == ".bmp" || ext == ".webp" || ext == ".tga";
-    }
-
-    std::string build_display_name(const std::string& full_path) {
-        const auto parts = split_path(full_path);
-        if (parts.size() <= 1) return strip_extension(get_basename(full_path));
-
-        std::string filename = strip_extension(parts.back());
-        size_t start = 1;  // skip category (first component)
-        size_t end = parts.size() - 1;  // skip filename
-
-        if (start >= end) {
-            // Only category + filename, no middle path
-            return filename;
-        }
-
-        std::string result;
-        for (size_t i = start; i < end; i++) {
-            if (!result.empty()) result += '/';
-            result += parts[i];
-        }
-
-        if (end - start <= 1 && filename != parts[end - 1]) {
-            result += "/" + filename;
-        }
-
-        return result;
-    }
-}
 
 void SpineCatalog::Clear() {
-    entries.clear();
-    root_category.subcategories.clear();
-    root_category.entry_indices.clear();
-    scsp_files.clear();
-    atlas_files.clear();
-    all_files.clear();
-    built = false;
+    m_entries.clear();
+    m_root_category = SpineCategory{};
+    m_scsp_files.clear();
+    m_atlas_files.clear();
+    m_all_files.clear();
+    m_built = false;
 }
 
 void SpineCatalog::CollectFiles(const Core::FileNode& node) {
-    if (std::holds_alternative<Core::FileInfo>(node.data)) {
-        const std::string path = normalize_path(node.full_path);
-        const std::string ext = get_extension(node.name);
-        all_files[path] = &node;
+    if (node.IsFile()) {
+        const std::string path = Core::NormalizeArchivePath(node.full_path);
+        const std::string ext = Core::GetExtensionLower(node.name);
+        m_all_files[path] = &node;
 
         if (ext == ".scsp") {
-            scsp_files[path] = &node;
+            m_scsp_files[path] = &node;
         } else if (ext == ".atlas") {
-            atlas_files[path] = &node;
+            m_atlas_files[path] = &node;
         }
-    } else {
-        const auto& folder = std::get<Core::FolderInfo>(node.data).children;
-        for (const auto& child : folder) {
-            CollectFiles(child);
-        }
+        return;
     }
-}
 
-const Core::FileNode* SpineCatalog::FindSiblingByName(const std::string& scsp_path, const std::string& filename) {
-    const std::string dir = get_directory(scsp_path);
-    const std::string target = dir.empty() ? filename : dir + "/" + filename;
-    if (const auto it = all_files.find(normalize_path(target)); it != all_files.end()) return it->second;
-    return nullptr;
+    for (const auto& child : std::get<Core::FolderInfo>(node.data).children) {
+        CollectFiles(child);
+    }
 }
 
 std::vector<std::string> SpineCatalog::ParseAtlasTextureNames(const std::vector<uint8_t>& atlas_data) {
@@ -132,109 +44,98 @@ std::vector<std::string> SpineCatalog::ParseAtlasTextureNames(const std::vector<
     bool after_blank = true;
 
     while (std::getline(ss, line)) {
-        if (!line.empty() && line.back() == '\r')
+        if (!line.empty() && line.back() == '\r') {
             line.pop_back();
-
+        }
         if (line.empty()) {
             after_blank = true;
             continue;
         }
-
-        if (after_blank && !line.empty() && line[0] != ' ' && line[0] != '\t') {
-            if (line.find('.') != std::string::npos) {
-                textures.push_back(line);
-            }
+        if (after_blank && line[0] != ' ' && line[0] != '\t' && line.find('.') != std::string::npos) {
+            textures.push_back(line);
         }
         after_blank = false;
     }
-
     return textures;
 }
 
 void SpineCatalog::MatchEntries() {
-    int skipped_no_atlas = 0;
+    size_t skipped_no_atlas = 0;
 
     std::unordered_map<std::string, std::vector<const Core::FileNode*>> atlases_by_dir;
-    for (auto& [apath, anode] : atlas_files) {
-        atlases_by_dir[get_directory(apath)].push_back(anode);
+    for (const auto& [apath, anode] : m_atlas_files) {
+        atlases_by_dir[Core::GetDirectory(apath)].push_back(anode);
     }
 
-    for (auto& [scsp_path, scsp_node] : scsp_files) {
-        SpineEntry entry;
-        entry.name = strip_extension(scsp_node->name);
-        entry.scsp_node = scsp_node;
-        entry.atlas_node = nullptr;
+    m_entries.reserve(m_scsp_files.size());
+    for (const auto& [scsp_path, scsp_node] : m_scsp_files) {
+        const std::string base_name = Core::StripExtension(scsp_node->name);
+        const std::string dir = Core::GetDirectory(scsp_path);
 
-        std::string norm_path = normalize_path(scsp_node->full_path);
-
-        entry.display_name = strip_extension(scsp_node->name);
-        entry.category = get_directory(norm_path);
-
-        std::string dir = get_directory(norm_path);
-        std::string base_name = strip_extension(scsp_node->name);
-
-        std::string atlas_candidate = dir.empty() ? base_name + ".atlas" : dir + "/" + base_name + ".atlas";
-        if (auto atlas_it = atlas_files.find(normalize_path(atlas_candidate)); atlas_it != atlas_files.end()) {
-            entry.atlas_node = atlas_it->second;
+        const Core::FileNode* atlas_node = nullptr;
+        const std::string atlas_candidate = dir.empty() ? (base_name + ".atlas") : (dir + "/" + base_name + ".atlas");
+        if (const auto it = m_atlas_files.find(atlas_candidate); it != m_atlas_files.end()) {
+            atlas_node = it->second;
+        } else if (const auto dir_it = atlases_by_dir.find(dir); dir_it != atlases_by_dir.end() && dir_it->second.size() == 1) {
+            atlas_node = dir_it->second.front();
         }
 
-        if (!entry.atlas_node) {
-            if (auto dir_it = atlases_by_dir.find(dir); dir_it != atlases_by_dir.end() && dir_it->second.size() == 1) {
-                entry.atlas_node = dir_it->second[0];
-            }
-        }
-
-        if (!entry.atlas_node) {
-            skipped_no_atlas++;
+        if (!atlas_node) {
+            ++skipped_no_atlas;
             continue;
         }
 
-        entries.push_back(std::move(entry));
+        SpineEntry entry;
+        entry.name = base_name;
+        entry.display_name = base_name;
+        entry.category = dir;
+        entry.scsp_node = scsp_node;
+        entry.atlas_node = atlas_node;
+        m_entries.push_back(std::move(entry));
     }
 
-    LogInfo("SpineCatalog: " + std::to_string(entries.size()) + " entries with atlas, " + std::to_string(skipped_no_atlas) + " skipped (no atlas)");
+    LogInfo(std::format("SpineCatalog: {} entries with atlas, {} skipped (no atlas)", m_entries.size(), skipped_no_atlas));
 
-    std::sort(entries.begin(), entries.end(),
-    [](const SpineEntry& a, const SpineEntry& b) {
+    std::ranges::sort(m_entries, [](const SpineEntry& a, const SpineEntry& b) {
         if (a.category != b.category) return a.category < b.category;
         return a.display_name < b.display_name;
     });
 }
 
-void SpineCatalog::EnsureDetailsLoaded(IArchive& pack, const SpineEntry& entry) const {
+void SpineCatalog::EnsureDetailsLoaded(IArchive& archive, const SpineEntry& entry) const {
     if (entry.details_loaded) return;
     entry.details_loaded = true;
 
     try {
-        if (std::vector<uint8_t> data = pack.GetFileData(*entry.scsp_node); !data.empty()) {
-            ScspParser::HeaderInfo hdr = ScspParser::ExtractHeader(data);
-            entry.header_info = hdr;
+        if (const auto data = archive.GetFileData(*entry.scsp_node); !data.empty()) {
+            entry.header_info = ScspParser::ExtractHeader(data);
         }
     } catch (...) {}
 
     try {
-        if (std::vector<uint8_t> atlas_data = pack.GetFileData(*entry.atlas_node); !atlas_data.empty()) {
-            auto tex_names = ParseAtlasTextureNames(atlas_data);
-            std::string scsp_path = normalize_path(entry.scsp_node->full_path);
-            
-            for (const auto& tex_name : tex_names) {
-                std::string dir = get_directory(scsp_path);
-                std::string target = dir.empty() ? tex_name : dir + "/" + tex_name;
-                auto it = all_files.find(normalize_path(target));
-                const Core::FileNode* img = (it != all_files.end()) ? it->second : nullptr;
+        if (const auto atlas_data = archive.GetFileData(*entry.atlas_node); !atlas_data.empty()) {
+            const auto tex_names = ParseAtlasTextureNames(atlas_data);
+            const std::string scsp_dir = Core::GetDirectory(Core::NormalizeArchivePath(entry.scsp_node->full_path));
 
-                if (img && is_image_extension(img->name)) {
-                    entry.image_nodes.push_back(img);
+            for (const auto& tex_name : tex_names) {
+                const std::string direct_target = Core::NormalizeArchivePath(
+                    scsp_dir.empty() ? tex_name : (scsp_dir + "/" + tex_name));
+
+                if (const auto it = m_all_files.find(direct_target);
+                    it != m_all_files.end() && Core::IsAnyImageExtension(Core::GetExtension(it->second->name)))
+                {
+                    entry.image_nodes.push_back(it->second);
+                    continue;
                 }
 
-                if (!img && !entry.header_info.images_path.empty()) {
-                    std::string img_path = normalize_path(entry.header_info.images_path);
-                    if (!img_path.empty() && img_path.back() != '/') img_path += '/';
-                    img_path += tex_name;
-                    std::string scsp_dir = get_directory(scsp_path);
-                    std::string full_img = scsp_dir.empty() ? img_path : scsp_dir + "/" + img_path;
-                    auto it2 = all_files.find(normalize_path(full_img));
-                    if (it2 != all_files.end() && is_image_extension(it2->second->name)) {
+                if (!entry.header_info.images_path.empty()) {
+                    const std::string rel = Core::NormalizeArchivePath(entry.header_info.images_path + "/" + tex_name);
+                    const std::string full_target = Core::NormalizeArchivePath(
+                        scsp_dir.empty() ? rel : (scsp_dir + "/" + rel));
+
+                    if (const auto it2 = m_all_files.find(full_target);
+                        it2 != m_all_files.end() && Core::IsAnyImageExtension(Core::GetExtension(it2->second->name)))
+                    {
                         entry.image_nodes.push_back(it2->second);
                     }
                 }
@@ -243,44 +144,55 @@ void SpineCatalog::EnsureDetailsLoaded(IArchive& pack, const SpineEntry& entry) 
     } catch (...) {}
 }
 
-void SpineCatalog::BuildCategories() {
-    root_category.name = "Root";
-    root_category.full_path = "";
-    root_category.entry_indices.clear();
-    root_category.subcategories.clear();
-
-    for (size_t i = 0; i < entries.size(); i++) {
-        if (const std::string& cat_path = entries[i].category; cat_path.empty()) {
-            root_category.entry_indices.push_back(i);
-        } else {
-            auto parts = split_path(cat_path);
-            SpineCategory* current = &root_category;
-            std::string cur_path;
-            for (const auto& part : parts) {
-                if (!cur_path.empty()) cur_path += '/';
-                cur_path += part;
-                
-                auto& sub = current->subcategories[part];
-                if (sub.name.empty()) {
-                    sub.name = part;
-                    sub.full_path = cur_path;
-                }
-                current = &sub;
-            }
-            current->entry_indices.push_back(i);
-        }
+size_t SpineCatalog::ComputeCategoryCounts(SpineCategory& category) noexcept {
+    size_t total = category.entry_indices.size();
+    for (auto& [_, sub] : category.subcategories) {
+        total += ComputeCategoryCounts(sub);
     }
+    category.total_entries = total;
+    return total;
 }
 
-void SpineCatalog::Build(IArchive& pack, const Core::FileNode& root) {
+void SpineCatalog::BuildCategories() {
+    m_root_category = SpineCategory{};
+    m_root_category.name = "Root";
+
+    for (size_t i = 0; i < m_entries.size(); ++i) {
+        const std::string& cat_path = m_entries[i].category;
+        if (cat_path.empty()) {
+            m_root_category.entry_indices.push_back(i);
+            continue;
+        }
+
+        SpineCategory* current = &m_root_category;
+        std::string cur_path;
+        for (const auto& part : Core::SplitPath(cat_path)) {
+            if (!cur_path.empty()) cur_path.push_back('/');
+            cur_path.append(part);
+
+            auto& sub = current->subcategories[part];
+            if (sub.name.empty()) {
+                sub.name = part;
+                sub.full_path = cur_path;
+            }
+            current = &sub;
+        }
+        current->entry_indices.push_back(i);
+    }
+
+    ComputeCategoryCounts(m_root_category);
+}
+
+void SpineCatalog::Build(IArchive& archive, const Core::FileNode& root) {
+    (void)archive;
     Clear();
     LogInfo("SpineCatalog: scanning file tree...");
     CollectFiles(root);
-    LogInfo("SpineCatalog: found " + std::to_string(scsp_files.size()) + " .scsp, "
-            + std::to_string(atlas_files.size()) + " .atlas, "
-            + std::to_string(all_files.size()) + " total files");
+    LogInfo(std::format(
+        "SpineCatalog: found {} .scsp, {} .atlas, {} total files",
+        m_scsp_files.size(), m_atlas_files.size(), m_all_files.size()));
     MatchEntries();
     BuildCategories();
     LogInfo("SpineCatalog: built tree successfully");
-    built = true;
+    m_built = true;
 }
