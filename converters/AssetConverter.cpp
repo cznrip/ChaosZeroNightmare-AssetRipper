@@ -84,8 +84,7 @@ namespace {
             std::string_view filename) const override
         {
             LogInfo(std::string("Converting SCSP to JSON: ") + std::string(filename));
-            std::vector<uint8_t> input(raw_data.begin(), raw_data.end());
-            const std::string json_str = ScspParser::ConvertToJson(input);
+            const std::string json_str = ScspParser::ConvertToJson(raw_data);
             if (json_str.empty() || json_str == "{}") return std::nullopt;
             return std::vector<uint8_t>(json_str.begin(), json_str.end());
         }
