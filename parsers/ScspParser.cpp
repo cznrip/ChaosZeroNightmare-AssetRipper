@@ -60,7 +60,7 @@ namespace {
     constexpr std::array<std::string_view, 3> kSpacingModes = {"length", "fixed", "percent"};
     constexpr std::array<std::string_view, 3> kRotateModes = {"tangent", "chain", "chainScale"};
 
-    double RoundFloat(double value, int decimals = 6) noexcept {
+    double RoundFloat(const double value, const int decimals = 6) noexcept {
         if (const double rounded = std::round(value); std::abs(value - rounded) < 1e-5) {
             return rounded;
         }
@@ -68,21 +68,21 @@ namespace {
         return std::round(value * multiplier) / multiplier;
     }
 
-    uint8_t FloatColorToByte(float channel) noexcept {
+    uint8_t FloatColorToByte(const float channel) noexcept {
         return static_cast<uint8_t>(std::round(std::clamp(channel, 0.0f, 1.0f) * 255.0f));
     }
 
-    std::string RgbaToHex(float r, float g, float b, float a) {
+    std::string RgbaToHex(const float r, const float g, const float b, const float a) {
         return std::format("{:02X}{:02X}{:02X}{:02X}",
             FloatColorToByte(r), FloatColorToByte(g), FloatColorToByte(b), FloatColorToByte(a));
     }
 
-    std::string RgbToHex(float r, float g, float b) {
+    std::string RgbToHex(const float r, const float g, const float b) {
         return std::format("{:02X}{:02X}{:02X}",
             FloatColorToByte(r), FloatColorToByte(g), FloatColorToByte(b));
     }
 
-    bool ExtractBezierFromSpineBlock(std::span<const float> block, float& cx1, float& cy1, float& cx2, float& cy2) noexcept {
+    bool ExtractBezierFromSpineBlock(const std::span<const float> block, float& cx1, float& cy1, float& cx2, float& cy2) noexcept {
         if (block.size() < 19) return false;
 
         const float x0 = block[1], y0 = block[2];
@@ -110,13 +110,12 @@ namespace {
         return true;
     }
 
-    void AppendCurve(size_t frame_index, std::span<const float> curves, json& frame) {
+    void AppendCurve(const size_t frame_index, const std::span<const float> curves, json& frame) {
         constexpr size_t kBezierStride = 19;
         const size_t start = frame_index * kBezierStride;
         if (start + kBezierStride > curves.size()) return;
 
-        const auto block = curves.subspan(start, kBezierStride);
-        if (block[0] == 1.0f) {
+        if (const auto block = curves.subspan(start, kBezierStride); block[0] == 1.0f) {
             frame["curve"] = "stepped";
         } else if (block[0] == 2.0f) {
             float cx1 = 0, cy1 = 0, cx2 = 0, cy2 = 0;
@@ -154,8 +153,7 @@ namespace {
      */
     class ScspDecoder {
     public:
-        explicit ScspDecoder(std::span<const uint8_t> decompressed)
-            : m_reader(decompressed) {}
+        explicit ScspDecoder(const std::span<const uint8_t> decompressed_scsp) : m_reader(decompressed_scsp) {}
 
         [[nodiscard]] ScspParser::HeaderInfo DecodeHeaderOnly() {
             ParseHeader();
@@ -226,11 +224,11 @@ namespace {
 
         using AttachmentMetaKey = std::tuple<std::string, int, std::string>;
 
-        [[nodiscard]] std::string ReadStringAt(uint32_t rel_offset) const {
-            if (rel_offset == kInvalidStringOffset || rel_offset >= m_string_table.size()) {
+        [[nodiscard]] std::string ReadStringAt(const uint32_t string_offset) const {
+            if (string_offset == kInvalidStringOffset || string_offset >= m_string_table.size()) {
                 return {};
             }
-            return Core::BinaryReader::ReadCString(m_string_table, rel_offset);
+            return Core::BinaryReader::ReadCString(m_string_table, string_offset);
         }
 
         [[nodiscard]] std::string ReadStringRef() {
@@ -239,7 +237,7 @@ namespace {
         }
 
         template <typename MapT>
-        static std::string LookupOrDefault(const MapT& map, typename MapT::key_type key, std::string fallback) {
+        static std::string LookupOrDefault(const MapT& map, MapT::key_type key, std::string fallback) {
             if (const auto it = map.find(key); it != map.end()) {
                 return it->second;
             }
