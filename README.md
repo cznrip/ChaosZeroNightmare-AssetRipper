@@ -1,10 +1,10 @@
-# Chaos Zero Nightmare ASSet Ripper
+# ChaosZeroNightmare-AssetRipper
 ASSet Ripper is a tool for extracting encrypted pack assets from yuna engine, or certain anime games.
 
 ![Preview](./assets/img.png)
 
 
-## [→ Download ←](https://nightly.link/cznrip/Chaos-Zero-Nightmare-ASSet-Ripper/workflows/build/main/ChaosZeroNightmareRipper.zip) 
+## [→ Download ←](https://nightly.link/cznrip/ChaosZeroNightmare-AssetRipper/workflows/build/main/ChaosZeroNightmareRipper.zip) 
 > [!IMPORTANT]
 > Releases tab has outdated builds and won't be updated anymore. Download the tool using the link above or via Github [Actions](https://github.com/akioukun/Chaos-Zero-Nightmare-ASSet-Ripper/actions)
 
@@ -22,6 +22,7 @@ And export either all files or only selected files and folders, depending on you
 2) Click `Scan Tree` to scan the pack and build the game resource tree.
 
 ### SSRA archives
+`.ssra` archives are standalone (independent from `data.pack`).
 1) Click `Open Pack` and select a `manifest.ssra` directly, usually inside the game's `gameres` directory.
 2) Keep the corresponding `.ssrc` files in the sibling `chunks` directory, for example `gameres\chunks`.
 3) Click `Scan Tree` to scan the manifest and its available chunks.
@@ -64,7 +65,17 @@ ChaosZeroNightmareRipper-CLI --pack "WhereYouInstalledTheGame\ChaosZeroNightmare
 | `-q`, `--quiet` | suppress the progress bar |
 | `-h`, `--help` | show help |
 
-The output preserves the full archive path, so `--out D:\out --folder collapse/collapse_illustration` writes to `D:\out\collapse\collapse_illustration\`. Texture and database conversion are on by default, matching the GUI. A folder that is not in the archive is reported but does not stop the others, and the exit code says what happened: `0` every folder found and extracted, `1` usage error, `2` the pack could not be opened or scanned, `3` some folders were missing or failed, `4` none could be extracted. Errors on individual files are logged and skipped without changing the exit code, so check `czn_ripper.log` to confirm a clean run.
+The output preserves the full archive path, so `--out D:\out --folder collapse/collapse_illustration` writes to `D:\out\collapse\collapse_illustration\`. 
+
+
+A folder that is not in the archive is reported but does not stop the others, and the exit code says what happened: 
+- `0` every folder found and extracted, 
+- `1` usage error 
+- `2` the pack could not be opened or scanned, 
+- `3` some folders were missing or failed, 
+- `4` none could be extracted. 
+
+Errors on individual files are logged and skipped without changing the exit code, so check `czn_ripper.log`.
 
 ## Build Instructions
 

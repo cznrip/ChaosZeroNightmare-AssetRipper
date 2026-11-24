@@ -1,8 +1,9 @@
 cmake_minimum_required(VERSION 3.16)
 project(ChaosZeroNightmareRipper LANGUAGES C CXX)
 
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
 
 find_package(SDL2 CONFIG REQUIRED)
 find_package(SDL2_image CONFIG REQUIRED)
@@ -23,13 +24,18 @@ file(GLOB SPINE_CPP_SOURCES "libs/spine-cpp/src/spine/*.cpp")
 
 # Sources shared by the GUI and the headless CLI
 set(CZN_CORE_SOURCES
-        archive/DataPack.cpp
-        archive/ArchiveBase.cpp
-        archive/SSRArchive.cpp
-        archive/CompositeArchive.cpp
-        parsers/SCTParser.cpp
-        parsers/DBParser.cpp
-        parsers/SCSPParser.cpp
+    core/AppSettings.cpp
+    archive/ArchiveBase.cpp
+    archive/ArchiveFactory.cpp
+    archive/DataPackArchive.cpp
+    archive/DirectoryArchive.cpp
+    archive/SsraArchive.cpp
+    converters/AssetConverter.cpp
+    services/AssetExporter.cpp
+    services/FileMap.cpp
+    parsers/SctParser.cpp
+    parsers/DbParser.cpp
+    parsers/ScspParser.cpp
     libs/zstd/zstddeclib.c
 )
 
@@ -37,6 +43,8 @@ set(CZN_CORE_INCLUDE_DIRS
     "${CMAKE_CURRENT_SOURCE_DIR}"
     "${CMAKE_CURRENT_SOURCE_DIR}/core"
     "${CMAKE_CURRENT_SOURCE_DIR}/archive"
+    "${CMAKE_CURRENT_SOURCE_DIR}/converters"
+    "${CMAKE_CURRENT_SOURCE_DIR}/services"
     "${CMAKE_CURRENT_SOURCE_DIR}/parsers"
     "${CMAKE_CURRENT_SOURCE_DIR}/libs"
     "${CMAKE_CURRENT_SOURCE_DIR}/libs/zstd"
@@ -51,17 +59,19 @@ target_link_libraries(czn_core PUBLIC astc-encoder::astcenc-static Threads::Thre
 add_executable(
     ${PROJECT_NAME} WIN32
     main.cpp
-        gui/App.cpp
-        gui/AppState.cpp
-        gui/UIHelpers.cpp
-        gui/Popups.cpp
-        gui/PreviewPanel.cpp
-        gui/FileBrowserPanel.cpp
-        gui/SpinePanel.cpp
-        gui/Toolbar.cpp
+    gui/App.cpp
+    gui/AppState.cpp
+    gui/UiStyle.cpp
+    gui/ImageWindow.cpp
+    gui/PreviewManager.cpp
+    gui/PopupManager.cpp
+    gui/PreviewPanel.cpp
+    gui/FileBrowserPanel.cpp
+    gui/SpinePanel.cpp
+    gui/Toolbar.cpp
     $<TARGET_OBJECTS:czn_core>
-    parsers/SpineDictionary.cpp
-        parsers/SpineRenderer.cpp
+    parsers/SpineCatalog.cpp
+    parsers/SpineRenderer.cpp
     ${SPINE_CPP_SOURCES}
 )
 

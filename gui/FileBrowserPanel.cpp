@@ -1,775 +1,414 @@
 #include "gui/FileBrowserPanel.hpp"
-#include "gui/PreviewPanel.hpp"
-#include "gui/UIHelpers.hpp"
-#include "core/Core.hpp"
+#include "core/FileDialogs.hpp"
 #include "core/FileTree.hpp"
-#include "core/DialogPaths.hpp"
-
-#include "json.hpp"
-#include "nuklear.h"
+#include "core/StringUtils.hpp"
+#include "gui/UiStyle.hpp"
+#include "services/FileMap.hpp"
 
 #include <algorithm>
-#include <fstream>
+#include <format>
 #include <iostream>
-#include <map>
-#include <sstream>
-#include <vector>
 
 namespace {
-    constexpr auto FILEMAP_GENERATOR_ID = "Chaos-Zero-Nightmare-ASSet-Ripper";
 
     template <typename NodeT, typename SetT>
-    void update_multi_selection(const bool ctrl, SetT &selected_nodes, const NodeT *&selected_node, const NodeT *node)
-    {
-        if (ctrl)
-        {
-            auto it = selected_nodes.find(node);
-            if (it != selected_nodes.end())
+    void UpdateMultiSelection(bool ctrl, SetT& selected_nodes, const NodeT*& selected_node, const NodeT* node) {
+        if (ctrl) {
+            if (auto it = selected_nodes.find(node); it != selected_nodes.end()) {
                 selected_nodes.erase(it);
-            else
+            } else {
                 selected_nodes.insert(node);
-        }
-        else
-        {
+            }
+        } else {
             selected_nodes.clear();
             selected_nodes.insert(node);
         }
         selected_node = node;
     }
 
-    void handle_node_right_click(const Core::FileNode *node, struct nk_vec2 pos)
-    {
-        g_state.context_menu.node = node;
-        g_state.context_menu.position = pos;
-        g_state.context_menu.visible = true;
-    }
+    template <typename NodeT>
+    void ScrollTreeToSelected(nk_context* ctx, const SelectionState<NodeT>& selection, bool& scroll_to_selected) {
+        if (!scroll_to_selected || !selection.selected_node) return;
 
-    nlohmann::ordered_json build_filemap(const Core::FileNode &node)
-    {
-        nlohmann::ordered_json j;
-        j["name"] = node.name;
-        j["path"] = node.full_path;
+        if (const auto it = std::ranges::find(selection.visible_nodes, selection.selected_node);
+            it != selection.visible_nodes.end())
+        {
+            const int index = static_cast<int>(std::distance(selection.visible_nodes.begin(), it));
+            nk_uint current_x = 0, current_y = 0;
+            nk_group_get_scroll(ctx, "FileTree", &current_x, &current_y);
 
-        if (std::holds_alternative<Core::FileInfo>(node.data))
-        {
-            const auto &info = std::get<Core::FileInfo>(node.data);
-            j["type"] = "file";
-            j["size"] = info.size;
-            j["offset"] = info.offset;
-            j["format"] = info.format;
-        }
-        else
-        {
-            const auto &[folder] = std::get<Core::FolderInfo>(node.data);
-            j["type"] = "folder";
-            j["children"] = nlohmann::ordered_json::array();
-            for (const auto &child : folder)
-            {
-                j["children"].push_back(build_filemap(child));
+            const float row_height = 26.0f + ctx->style.window.spacing.y;
+            const float node_y = static_cast<float>(index) * row_height;
+            const float view_h = nk_window_get_content_region(ctx).h;
+
+            const float margin = row_height * 2.0f;
+            const float visible_top = static_cast<float>(current_y) + margin;
+            const float visible_bottom = static_cast<float>(current_y) + view_h - margin;
+
+            if (node_y < visible_top) {
+                const float target = (std::max)(0.0f, node_y - margin);
+                nk_group_set_scroll(ctx, "FileTree", current_x, static_cast<nk_uint>(target));
+            } else if (node_y + row_height > visible_bottom) {
+                const float target = (std::max)(0.0f, node_y + row_height - view_h + margin);
+                nk_group_set_scroll(ctx, "FileTree", current_x, static_cast<nk_uint>(target));
             }
         }
-
-        return j;
+        scroll_to_selected = false;
     }
 
-    bool is_valid_filemap(const nlohmann::ordered_json &j)
-    {
-        if (!j.is_object())
-            return false;
-
-        if (!j.contains("generator") || !j["generator"].is_string())
-            return false;
-
-        if (const std::string gen = j["generator"].get<std::string>(); gen != FILEMAP_GENERATOR_ID)
-        {
-            return false;
-        }
-
-        if (!j.contains("type") || j["type"] != "folder" || !j.contains("children") || !j["children"].is_array())
-        {
-            return false;
-        }
-
-        return true;
-    }
-
-    void navigate_old_tree(const nlohmann::ordered_json &j, std::map<std::string, uint64_t> &out_map)
-    {
-        if (j.contains("type") && j["type"] == "file")
-        {
-            if (j.contains("path") && j.contains("size"))
-            {
-                out_map[j["path"].get<std::string>()] = j["size"].get<uint64_t>();
-            }
-        }
-        else if (j.contains("type") && j["type"] == "folder" && j.contains("children"))
-        {
-            for (const auto &child : j["children"])
-            {
-                navigate_old_tree(child, out_map);
-            }
+    std::string FormatDiffDisplayName(const DiffNode& node) {
+        switch (node.status) {
+            case DiffStatus::Added:    return "[ADD] " + node.name;
+            case DiffStatus::Modified: return "[MOD] " + node.name;
+            case DiffStatus::Removed:  return "[DEL] " + node.name;
+            default:                   return node.name;
         }
     }
 
-    void navigate_new_tree(const Core::FileNode &node, std::map<std::string, uint64_t> &out_map)
+    bool CollectMatchingFileNodes(
+        const Core::FileNode& node,
+        const std::string& query_lower,
+        std::unordered_set<const Core::FileNode*>& visible_out,
+        std::unordered_set<const Core::FileNode*>& direct_out)
     {
-        if (std::holds_alternative<Core::FileInfo>(node.data))
-        {
-            const auto &info = std::get<Core::FileInfo>(node.data);
-            out_map[node.full_path] = info.size;
-        }
-        else
-        {
-            const auto &[folder] = std::get<Core::FolderInfo>(node.data);
-            for (const auto &child : folder)
-            {
-                navigate_new_tree(child, out_map);
-            }
-        }
-    }
+        const bool self_matches = Core::ToLower(node.name).find(query_lower) != std::string::npos;
+        if (self_matches) direct_out.insert(&node);
 
-    void insert_diff_node(DiffNode *root, const std::string &path, const uint64_t size, const DiffStatus status)
-    {
-        std::string norm_path = path;
-        std::replace(norm_path.begin(), norm_path.end(), '\\', '/');
-
-        std::vector<std::string> parts;
-        std::stringstream ss(norm_path);
-        std::string part;
-        while (std::getline(ss, part, '/'))
-        {
-            if (!part.empty())
-                parts.push_back(part);
-        }
-
-        DiffNode *current = root;
-        std::string current_full_path;
-        for (size_t i = 0; i < parts.size(); i++)
-        {
-            if (!current_full_path.empty())
-                current_full_path += '/';
-            current_full_path += parts[i];
-
-            const bool is_last = (i == parts.size() - 1);
-
-            auto it = std::find_if(current->children.begin(), current->children.end(), [&](const std::unique_ptr<DiffNode> &n){ return n->name == parts[i]; });
-
-            if (it != current->children.end())
-            {
-                current = it->get();
-                if (is_last)
-                {
-                    if (status != DiffStatus::Unchanged)
-                        current->status = status;
-                }
-                else
-                {
-                    if (status != DiffStatus::Unchanged && current->status == DiffStatus::Unchanged)
-                    {
-                        current->status = DiffStatus::Modified;
-                    }
-                }
-            }
-            else
-            {
-                auto new_node = std::make_unique<DiffNode>();
-                new_node->name = parts[i];
-                new_node->full_path = current_full_path;
-                new_node->is_folder = !is_last;
-
-                if (is_last)
-                {
-                    new_node->size = size;
-                    new_node->status = status;
-                    if (const size_t dot_pos = parts[i].find_last_of('.'); dot_pos != std::string::npos)
-                    {
-                        new_node->format = parts[i].substr(dot_pos);
-                    }
-                    else
-                    {
-                        new_node->format = "";
-                    }
-                }
-                else
-                {
-                    new_node->size = 0;
-                    new_node->status = (status == DiffStatus::Unchanged) ? DiffStatus::Unchanged : DiffStatus::Modified;
-                }
-
-                current->children.push_back(std::move(new_node));
-                current = current->children.back().get();
-            }
-        }
-    }
-
-    void build_diff_tree(const nlohmann::ordered_json &old_json)
-    {
-        std::map<std::string, uint64_t> old_map;
-        navigate_old_tree(old_json, old_map);
-
-        std::map<std::string, uint64_t> new_map;
-        if (g_state.browser.data_pack)
-        {
-            navigate_new_tree(g_state.browser.data_pack->GetFileTree(), new_map);
-        }
-
-        g_state.diff.root = std::make_unique<DiffNode>();
-        g_state.diff.root->name = "Diff Root";
-        g_state.diff.root->full_path = "";
-        g_state.diff.root->is_folder = true;
-        g_state.diff.root->status = DiffStatus::Unchanged;
-
-        for (const auto &[key, value] : old_map)
-        {
-            const std::string &path = key;
-            const uint64_t old_size = value;
-
-            auto it = new_map.find(path);
-            if (it == new_map.end())
-            {
-                insert_diff_node(g_state.diff.root.get(), path, old_size, DiffStatus::Removed);
-            }
-            else
-            {
-                if (it->second != old_size)
-                {
-                    insert_diff_node(g_state.diff.root.get(), path, it->second, DiffStatus::Modified);
-                }
-                else
-                {
-                    insert_diff_node(g_state.diff.root.get(), path, it->second, DiffStatus::Unchanged);
+        bool any_child_matches = false;
+        if (const auto* folder = std::get_if<Core::FolderInfo>(&node.data)) {
+            for (const auto& child : folder->children) {
+                if (CollectMatchingFileNodes(child, query_lower, visible_out, direct_out)) {
+                    any_child_matches = true;
                 }
             }
         }
 
-        for (const auto &[key, value] : new_map)
-        {
-            const std::string &path = key;
-            const uint64_t new_size = value;
-            if (old_map.find(path) == old_map.end())
-            {
-                insert_diff_node(g_state.diff.root.get(), path, new_size, DiffStatus::Added);
-            }
-        }
-
-        std::function<void(DiffNode *)> sort_tree = [&](DiffNode *node)
-        {
-            std::sort(node->children.begin(), node->children.end(), [](const std::unique_ptr<DiffNode> &a, const std::unique_ptr<DiffNode> &b)
-                      {
-                if (a->is_folder != b->is_folder) return a->is_folder > b->is_folder;
-                return a->name < b->name; });
-            for (auto &child : node->children)
-            {
-                sort_tree(child.get());
-            }
-        };
-        sort_tree(g_state.diff.root.get());
-
-        g_state.diff.show_tree = true;
-        g_state.diff.selection.expanded_folders.clear();
-        g_state.diff.selection.expanded_folders.insert(g_state.diff.root.get());
-        g_state.diff.selection.selected_node = nullptr;
-        g_state.diff.selection.selected_nodes.clear();
-    }
-
-    bool load_diff_tree_from_filemap()
-    {
-        try
-        {
-            const std::string picked_path = DialogPaths::OpenFile(DialogPaths::Slot::Export, "Select an older filemap.json", {"JSON Files", "*.json", "All Files", "*.*"});
-            if (picked_path.empty())
-            {
-                return false;
-            }
-
-            std::ifstream in(picked_path);
-            if (!in.is_open())
-            {
-                g_state.tasks.status = "Error opening filemap.json for diff.";
-                return false;
-            }
-
-            std::string content((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-            in.close();
-
-            const nlohmann::ordered_json old_json = nlohmann::ordered_json::parse(content);
-            if (!is_valid_filemap(old_json))
-            {
-                g_state.tasks.status = "Error: Selected file is not a valid filemap generated by this tool.";
-                g_state.common.error_message = "Selected file is not a valid filemap generated by this tool. Please select a valid filemap.json.";
-                g_state.common.show_error_popup = true;
-                return false;
-            }
-
-            build_diff_tree(old_json);
-            g_state.tasks.status = "Diff view generated.";
+        if (self_matches || any_child_matches) {
+            visible_out.insert(&node);
             return true;
-        }
-        catch (const std::exception &e)
-        {
-            g_state.tasks.status = "Error parsing JSON: " + std::string(e.what());
-            g_state.common.error_message = "Error parsing JSON: " + std::string(e.what());
-            g_state.common.show_error_popup = true;
-            return false;
-        }
-    }
-
-    std::string diff_status_label(const DiffStatus status)
-    {
-        switch (status)
-        {
-            case DiffStatus::Added:
-                return "[ADD] ";
-            case DiffStatus::Modified:
-                return "[MOD] ";
-            case DiffStatus::Removed:
-                return "[DEL] ";
-            default:
-                return "";
-        }
-    }
-
-    std::string diff_display_name(const DiffNode &node)
-    {
-        return diff_status_label(node.status) + node.name;
-    }
-
-    void handle_diff_node_click(const DiffNode *node, const bool is_folder)
-    {
-        const bool ctrl_pressed = (SDL_GetModState() & KMOD_CTRL) != 0;
-        const uint32_t current_time = SDL_GetTicks();
-
-        if (const uint32_t time_diff = current_time - g_state.browser.selection.last_click_time; time_diff < 250 && node == g_state.diff.selection.last_clicked_node)
-        {
-            g_state.browser.selection.last_click_time = current_time;
-            return;
-        }
-
-        update_multi_selection(ctrl_pressed, g_state.diff.selection.selected_nodes, g_state.diff.selection.selected_node, node);
-
-        if (!is_folder && g_state.browser.data_pack)
-        {
-            if (const Core::FileNode *file_node = Core::FindNodeByPath(g_state.browser.data_pack->GetFileTree(), node->full_path))
-            {
-                load_preview(*file_node);
-            }
-            else
-            {
-                clear_preview();
-                g_state.preview.error = "File not found in current datapack (perhaps it was removed).";
-            }
-        }
-        else
-        {
-            clear_preview();
-        }
-
-        g_state.browser.selection.last_click_time = current_time;
-        g_state.diff.selection.last_clicked_node = node;
-    }
-
-    int get_diff_file_count(const DiffNode &node)
-    {
-        if (!node.is_folder)
-            return 1;
-        int count = 0;
-        for (const auto &child : node.children)
-        {
-            count += get_diff_file_count(*child);
-        }
-        return count;
-    }
-
-    uint64_t get_diff_folder_size(const DiffNode &node)
-    {
-        if (!node.is_folder)
-            return node.size;
-        uint64_t size = 0;
-        for (const auto &child : node.children)
-        {
-            size += get_diff_folder_size(*child);
-        }
-        return size;
-    }
-
-    bool matches_diff_search(const DiffNode &node, const std::string &query)
-    {
-        if (query.empty())
-            return true;
-        const std::string name_lower = Core::ToLower(node.name);
-        const std::string query_lower = Core::ToLower(query);
-        return name_lower.find(query_lower) != std::string::npos;
-    }
-
-    bool has_matching_diff_child(const DiffNode &node, const std::string &query)
-    {
-        if (query.empty())
-            return true;
-        if (matches_diff_search(node, query))
-            return true;
-        if (node.is_folder)
-        {
-            for (const auto &child : node.children)
-            {
-                if (has_matching_diff_child(*child, query))
-                    return true;
-            }
         }
         return false;
     }
 
-    void draw_diff_node(nk_context *ctx, const DiffNode &node, int depth = 0)
+    bool CollectMatchingDiffNodes(
+        const DiffNode& node,
+        const std::string& query_lower,
+        std::unordered_set<const DiffNode*>& visible_out)
     {
-        try
-        {
-            if (node.is_folder)
-            {
-                if (!has_matching_diff_child(node, g_state.browser.search_query))
-                    return;
-
-                g_state.diff.selection.visible_nodes.push_back(&node);
-
-                const bool is_expanded = g_state.diff.selection.expanded_folders.find(&node) != g_state.diff.selection.expanded_folders.end();
-                const bool is_selected = (g_state.diff.selection.selected_nodes.find(&node) != g_state.diff.selection.selected_nodes.end()) || (g_state.diff.selection.selected_node == &node);
-
-                const int file_count = get_diff_file_count(node);
-                const std::string info = std::to_string(file_count) + " items | " + Core::FormatSize(get_diff_folder_size(node));
-                const struct nk_color text_color = get_diff_status_color(node.status, is_selected, true);
-
-                bool toggle_expand = false;
-                if (draw_tree_row(ctx, depth, true, is_expanded, is_selected, diff_display_name(node), info, text_color, toggle_expand))
-                {
-                    handle_diff_node_click(&node, true);
-                }
-
-                if (toggle_expand)
-                {
-                    if (is_expanded)
-                        g_state.diff.selection.expanded_folders.erase(&node);
-                    else
-                        g_state.diff.selection.expanded_folders.insert(&node);
-                }
-
-                if (is_expanded)
-                {
-                    for (const auto &child : node.children)
-                        draw_diff_node(ctx, *child, depth + 1);
-                }
-            }
-            else
-            {
-                if (!matches_diff_search(node, g_state.browser.search_query))
-                    return;
-
-                g_state.diff.selection.visible_nodes.push_back(&node);
-
-                const bool is_selected = (g_state.diff.selection.selected_nodes.find(&node) != g_state.diff.selection.selected_nodes.end()) || (g_state.diff.selection.selected_node == &node);
-                const std::string size_str = Core::FormatSize(node.size) + " | " + node.format;
-                const nk_color text_color = get_diff_status_color(node.status, is_selected, false);
-
-                if (bool toggle_expand = false; draw_tree_row(ctx, depth, false, false, is_selected, diff_display_name(node), size_str, text_color, toggle_expand))
-                {
-                    handle_diff_node_click(&node, false);
+        const bool self_matches = Core::ToLower(node.name).find(query_lower) != std::string::npos;
+        bool any_child_matches = false;
+        if (node.is_folder) {
+            for (const auto& child : node.children) {
+                if (CollectMatchingDiffNodes(*child, query_lower, visible_out)) {
+                    any_child_matches = true;
                 }
             }
         }
-        catch (const std::exception &e)
-        {
-            std::cerr << "Error drawing diff node: " << e.what() << std::endl;
+        if (self_matches || any_child_matches) {
+            visible_out.insert(&node);
+            return true;
         }
+        return false;
     }
 
-    void draw_file_node(nk_context *ctx, const Core::FileNode &node, const int depth = 0)
+} // namespace
+
+FileBrowserPanel::FileBrowserPanel(AppState& state, PreviewManager& preview)
+    : m_state(state), m_preview(preview) {}
+
+void FileBrowserPanel::EnsureFileFilterCache() {
+    if (!m_state.browser.archive) return;
+    if (m_cached_file_query == m_state.browser.search_query &&
+        m_cached_file_revision == m_state.browser.tree_revision)
     {
-        try
-        {
-            if (!has_matching_child(node, g_state.browser.search_query))
-                return;
-
-            g_state.browser.selection.visible_nodes.push_back(&node);
-
-            if (std::holds_alternative<Core::FolderInfo>(node.data))
-            {
-                const auto &[folder] = std::get<Core::FolderInfo>(node.data);
-                const bool is_expanded = g_state.browser.selection.expanded_folders.find(&node) != g_state.browser.selection.expanded_folders.end();
-                const bool is_selected = (g_state.browser.selection.selected_nodes.find(&node) != g_state.browser.selection.selected_nodes.end()) || (g_state.browser.selection.selected_node == &node);
-
-                const bool highlight_match = !g_state.browser.search_query.empty() && matches_search(node, g_state.browser.search_query);
-                const nk_color text_color = is_selected ? nk_rgb(255, 255, 255) : (highlight_match ? nk_rgb(100, 255, 100) : nk_rgb(220, 220, 220));
-
-                uint64_t bytes = 0;
-                uint32_t files = 0;
-                Core::NodeStats(node, bytes, files);
-                const std::string info = std::to_string(files) + " items | " + Core::FormatSize(bytes);
-
-                bool toggle_expand = false;
-                if (draw_tree_row(ctx, depth, true, is_expanded, is_selected, node.name, info, text_color, toggle_expand))
-                {
-                    handle_node_click(&node, true);
-                }
-
-                if (toggle_expand)
-                {
-                    if (is_expanded)
-                        g_state.browser.selection.expanded_folders.erase(&node);
-                    else
-                        g_state.browser.selection.expanded_folders.insert(&node);
-                }
-
-                if (is_expanded)
-                {
-                    for (const auto &child : folder)
-                        draw_file_node(ctx, child, depth + 1);
-                }
-            }
-            else
-            {
-                if (!matches_search(node, g_state.browser.search_query))
-                    return;
-
-                const auto &file_info = std::get<Core::FileInfo>(node.data);
-                const bool is_selected = (g_state.browser.selection.selected_nodes.find(&node) != g_state.browser.selection.selected_nodes.end()) || (g_state.browser.selection.selected_node == &node);
-
-                const nk_color text_color = is_selected ? nk_rgb(255, 255, 255) : nk_rgb(200, 200, 200);
-                const std::string size_str = Core::FormatSize(file_info.size) + " | " + file_info.format;
-
-                bool right_clicked = false;
-                struct nk_vec2 mouse_pos = {0, 0};
-                if (bool toggle_expand = false; draw_tree_row(ctx, depth, false, false, is_selected, node.name, size_str, text_color, toggle_expand, &right_clicked, &mouse_pos))
-                {
-                    handle_node_click(&node, false);
-                }
-
-                if (right_clicked)
-                {
-                    handle_node_right_click(&node, mouse_pos);
-                }
-            }
-        }
-        catch (const std::exception &e)
-        {
-            std::cerr << "Error drawing node: " << e.what() << std::endl;
-        }
-        catch (...)
-        {
-            std::cerr << "Unknown error drawing node" << std::endl;
-        }
-    }
-}
-
-void handle_node_click(const Core::FileNode *node, const bool is_folder)
-{
-    const bool ctrl_pressed = (SDL_GetModState() & KMOD_CTRL) != 0;
-    const uint32_t current_time = SDL_GetTicks();
-
-    if (const uint32_t time_diff = current_time - g_state.browser.selection.last_click_time; time_diff < 250 && node == g_state.browser.selection.last_clicked_node)
-    {
-        g_state.browser.selection.last_click_time = current_time;
         return;
     }
 
-    g_state.browser.click_count = 0;
-    update_multi_selection(ctrl_pressed, g_state.browser.selection.selected_nodes, g_state.browser.selection.selected_node, node);
+    m_cached_file_query = m_state.browser.search_query;
+    m_cached_file_revision = m_state.browser.tree_revision;
+    m_file_visible_set.clear();
+    m_file_direct_match_set.clear();
 
-    if (!is_folder)
-    {
-        load_preview(*node);
+    if (!m_cached_file_query.empty()) {
+        const std::string query_lower = Core::ToLower(m_cached_file_query);
+        CollectMatchingFileNodes(
+            m_state.browser.archive->GetFileTree(),
+            query_lower,
+            m_file_visible_set,
+            m_file_direct_match_set);
     }
-    else
-    {
-        clear_preview();
-    }
-
-    g_state.browser.selection.last_click_time = current_time;
-    g_state.browser.selection.last_clicked_node = node;
 }
 
-void export_to_json()
-{
-    try
+void FileBrowserPanel::EnsureDiffFilterCache() {
+    if (!m_state.diff.root) return;
+    if (m_cached_diff_query == m_state.browser.search_query &&
+        m_cached_diff_revision == m_state.diff.diff_revision)
     {
-        if (const std::string save_path = DialogPaths::SaveFile("Export File Map", "filemap.json", {"JSON Files", "*.json", "All Files", "*.*"}); !save_path.empty())
-        {
-            if (std::ofstream out(save_path); out.is_open())
-            {
-                nlohmann::ordered_json tree = build_filemap(g_state.browser.data_pack->GetFileTree());
-                nlohmann::ordered_json j;
-                j["generator"] = FILEMAP_GENERATOR_ID;
-                for (auto &el : tree.items())
-                {
-                    j[el.key()] = el.value();
-                }
-                out << j.dump(2);
-                out.close();
-                g_state.common.success_message = "File map exported successfully!";
-                g_state.common.show_success_popup = true;
-                g_state.tasks.status = "Exported to: " + save_path;
+        return;
+    }
+
+    m_cached_diff_query = m_state.browser.search_query;
+    m_cached_diff_revision = m_state.diff.diff_revision;
+    m_diff_visible_set.clear();
+
+    if (!m_cached_diff_query.empty()) {
+        const std::string query_lower = Core::ToLower(m_cached_diff_query);
+        CollectMatchingDiffNodes(*m_state.diff.root, query_lower, m_diff_visible_set);
+    }
+}
+
+void FileBrowserPanel::HandleFileNodeClick(const Core::FileNode* node, bool is_folder) {
+    const bool ctrl_pressed = (SDL_GetModState() & KMOD_CTRL) != 0;
+    const uint32_t now = SDL_GetTicks();
+
+    if (now - m_state.browser.selection.last_click_time < kDoubleClickDebounceMs &&
+        node == m_state.browser.selection.last_clicked_node)
+    {
+        m_state.browser.selection.last_click_time = now;
+        return;
+    }
+
+    UpdateMultiSelection(ctrl_pressed, m_state.browser.selection.selected_nodes, m_state.browser.selection.selected_node, node);
+
+    if (!is_folder && m_state.browser.archive) {
+        m_preview.Load(*m_state.browser.archive, *node);
+    } else {
+        m_preview.Clear();
+    }
+
+    m_state.browser.selection.last_click_time = now;
+    m_state.browser.selection.last_clicked_node = node;
+}
+
+void FileBrowserPanel::HandleDiffNodeClick(const DiffNode* node, bool is_folder) {
+    const bool ctrl_pressed = (SDL_GetModState() & KMOD_CTRL) != 0;
+    const uint32_t now = SDL_GetTicks();
+
+    if (now - m_state.diff.selection.last_click_time < kDoubleClickDebounceMs &&
+        node == m_state.diff.selection.last_clicked_node)
+    {
+        m_state.diff.selection.last_click_time = now;
+        return;
+    }
+
+    UpdateMultiSelection(ctrl_pressed, m_state.diff.selection.selected_nodes, m_state.diff.selection.selected_node, node);
+
+    if (!is_folder && m_state.browser.archive) {
+        if (const Core::FileNode* file_node = Core::FindNodeByPath(m_state.browser.archive->GetFileTree(), node->full_path)) {
+            m_preview.Load(*m_state.browser.archive, *file_node);
+        } else {
+            m_preview.SetError("File not found in current archive (perhaps it was removed).");
+        }
+    } else {
+        m_preview.Clear();
+    }
+
+    m_state.diff.selection.last_click_time = now;
+    m_state.diff.selection.last_clicked_node = node;
+}
+
+void FileBrowserPanel::HandleKeyDown(SDL_Keycode key, bool& scroll_to_selected) {
+    if (m_state.view_mode != ViewMode::FileTree) return;
+    auto& sel = m_state.browser.selection;
+    if (!sel.selected_node) return;
+
+    if ((key == SDLK_UP || key == SDLK_DOWN) && !sel.visible_nodes.empty()) {
+        const auto it = std::ranges::find(sel.visible_nodes, sel.selected_node);
+        if (it == sel.visible_nodes.end()) return;
+
+        if (key == SDLK_UP && it != sel.visible_nodes.begin()) {
+            const Core::FileNode* next = *std::prev(it);
+            HandleFileNodeClick(next, next->IsFolder());
+            scroll_to_selected = true;
+        } else if (key == SDLK_DOWN && std::next(it) != sel.visible_nodes.end()) {
+            const Core::FileNode* next = *std::next(it);
+            HandleFileNodeClick(next, next->IsFolder());
+            scroll_to_selected = true;
+        }
+    } else if (sel.selected_node->IsFolder()) {
+        if (key == SDLK_RETURN) {
+            if (sel.expanded_folders.contains(sel.selected_node)) {
+                sel.expanded_folders.erase(sel.selected_node);
+            } else {
+                sel.expanded_folders.insert(sel.selected_node);
+            }
+        } else if (key == SDLK_RIGHT) {
+            sel.expanded_folders.insert(sel.selected_node);
+        } else if (key == SDLK_LEFT) {
+            sel.expanded_folders.erase(sel.selected_node);
+        }
+    }
+}
+
+void FileBrowserPanel::DrawFileNode(nk_context* ctx, const Core::FileNode& node, int depth) {
+    const bool filtering = !m_cached_file_query.empty();
+    if (filtering && !m_file_visible_set.contains(&node)) return;
+
+    auto& sel = m_state.browser.selection;
+    sel.visible_nodes.push_back(&node);
+
+    if (const auto* folder = std::get_if<Core::FolderInfo>(&node.data)) {
+        const bool is_expanded = sel.expanded_folders.contains(&node);
+        const bool is_selected = sel.selected_nodes.contains(&node) || (sel.selected_node == &node);
+        const bool highlight = filtering && m_file_direct_match_set.contains(&node);
+        const nk_color color = is_selected ? nk_rgb(255, 255, 255)
+                             : highlight   ? nk_rgb(100, 255, 100)
+                                           : nk_rgb(220, 220, 220);
+
+        const std::string info = std::format("{} items | {}", folder->file_count, Core::FormatSize(folder->total_bytes));
+
+        bool toggle_expand = false;
+        if (UiStyle::DrawTreeRow(ctx, depth, true, is_expanded, is_selected, node.name, info, color, toggle_expand)) {
+            HandleFileNodeClick(&node, true);
+        }
+        if (toggle_expand) {
+            if (is_expanded) sel.expanded_folders.erase(&node);
+            else sel.expanded_folders.insert(&node);
+        }
+        if (is_expanded) {
+            for (const auto& child : folder->children) {
+                DrawFileNode(ctx, child, depth + 1);
             }
         }
-    }
-    catch (const std::exception &e)
-    {
-        g_state.tasks.status = "Export error: " + std::string(e.what());
-    }
-}
+    } else {
+        const auto& file_info = std::get<Core::FileInfo>(node.data);
+        const bool is_selected = sel.selected_nodes.contains(&node) || (sel.selected_node == &node);
+        const nk_color color = is_selected ? nk_rgb(255, 255, 255) : nk_rgb(200, 200, 200);
+        const std::string info = Core::FormatSize(file_info.size) + " | " + file_info.format;
 
-void set_file_tree_mode()
-{
-    g_state.spine.show_window = false;
-    g_state.diff.show_tree = false;
-}
-
-void set_spine_viewer_mode()
-{
-    g_state.diff.show_tree = false;
-    g_state.spine.show_window = true;
-}
-
-bool set_diff_viewer_mode()
-{
-    if (!g_state.diff.root)
-    {
-        if (!load_diff_tree_from_filemap())
-        {
-            return false;
+        bool right_clicked = false;
+        struct nk_vec2 mouse_pos{0.0f, 0.0f};
+        bool toggle_expand = false;
+        if (UiStyle::DrawTreeRow(ctx, depth, false, false, is_selected, node.name, info, color, toggle_expand, &right_clicked, &mouse_pos)) {
+            HandleFileNodeClick(&node, false);
+        }
+        if (right_clicked) {
+            m_state.context_menu.node = &node;
+            m_state.context_menu.position = mouse_pos;
+            m_state.context_menu.visible = true;
         }
     }
+}
 
-    g_state.spine.show_window = false;
-    g_state.diff.show_tree = true;
+void FileBrowserPanel::DrawDiffNode(nk_context* ctx, const DiffNode& node, int depth) {
+    const bool filtering = !m_cached_diff_query.empty();
+    if (filtering && !m_diff_visible_set.contains(&node)) return;
+
+    auto& sel = m_state.diff.selection;
+    sel.visible_nodes.push_back(&node);
+
+    const bool is_selected = sel.selected_nodes.contains(&node) || (sel.selected_node == &node);
+    const nk_color color = UiStyle::GetDiffStatusColor(node.status, is_selected, node.is_folder);
+
+    if (node.is_folder) {
+        const bool is_expanded = sel.expanded_folders.contains(&node);
+        const std::string info = std::format("{} items | {}", node.file_count, Core::FormatSize(node.size));
+
+        bool toggle_expand = false;
+        if (UiStyle::DrawTreeRow(ctx, depth, true, is_expanded, is_selected, FormatDiffDisplayName(node), info, color, toggle_expand)) {
+            HandleDiffNodeClick(&node, true);
+        }
+        if (toggle_expand) {
+            if (is_expanded) sel.expanded_folders.erase(&node);
+            else sel.expanded_folders.insert(&node);
+        }
+        if (is_expanded) {
+            for (const auto& child : node.children) {
+                DrawDiffNode(ctx, *child, depth + 1);
+            }
+        }
+    } else {
+        const std::string info = Core::FormatSize(node.size) + " | " + node.format;
+        bool toggle_expand = false;
+        if (UiStyle::DrawTreeRow(ctx, depth, false, false, is_selected, FormatDiffDisplayName(node), info, color, toggle_expand)) {
+            HandleDiffNodeClick(&node, false);
+        }
+    }
+}
+
+bool FileBrowserPanel::LoadDiffTreeFromFileMap() {
+    try {
+        const std::string picked_path = Core::FileDialogs::OpenFile(
+            Core::DialogSlot::Export,
+            "Select an older filemap.json",
+            {"JSON Files", "*.json", "All Files", "*.*"});
+        if (picked_path.empty()) return false;
+
+        const auto old_json = Services::FileMapSerializer::LoadFromFile(Core::Utf8ToWString(picked_path));
+        m_state.diff.root = Services::ArchiveDiff::Build(old_json, m_state.browser.archive->GetFileTree());
+        m_state.diff.selection.Clear();
+        m_state.diff.selection.expanded_folders.insert(m_state.diff.root.get());
+        ++m_state.diff.diff_revision;
+        m_state.tasks.runner.SetStatus("Diff view generated.");
+        return true;
+    } catch (const std::exception& e) {
+        m_state.tasks.runner.SetStatus("Error loading filemap: " + std::string(e.what()));
+        m_state.ui.error_message = e.what();
+        m_state.ui.show_error_popup = true;
+        return false;
+    }
+}
+
+void FileBrowserPanel::ExportFileMapJson() {
+    if (!m_state.browser.archive) return;
+    try {
+        const std::string save_path = Core::FileDialogs::SaveFile(
+            "Export File Map", "filemap.json", {"JSON Files", "*.json", "All Files", "*.*"});
+        if (save_path.empty()) return;
+
+        Services::FileMapSerializer::SaveToFile(m_state.browser.archive->GetFileTree(), Core::Utf8ToWString(save_path));
+        m_state.ui.success_message = "File map exported successfully!";
+        m_state.ui.show_success_popup = true;
+        m_state.tasks.runner.SetStatus("Exported to: " + save_path);
+    } catch (const std::exception& e) {
+        m_state.tasks.runner.SetStatus("Export error: " + std::string(e.what()));
+    }
+}
+
+void FileBrowserPanel::SetFileTreeMode() {
+    m_state.view_mode = ViewMode::FileTree;
+}
+
+void FileBrowserPanel::SetSpineViewerMode() {
+    m_state.view_mode = ViewMode::SpineViewer;
+}
+
+bool FileBrowserPanel::SetDiffViewerMode() {
+    if (!m_state.diff.root && !LoadDiffTreeFromFileMap()) {
+        return false;
+    }
+    m_state.view_mode = ViewMode::DiffTree;
     return true;
 }
 
-void draw_file_browser_panel(nk_context *ctx, const bool tree_scanned, bool &scroll_to_selected)
-{
-    if (nk_group_begin(ctx, "FileTree", NK_WINDOW_BORDER | NK_WINDOW_TITLE))
-    {
-        g_state.browser.selection.visible_nodes.clear();
-
-        if (g_state.browser.data_pack && tree_scanned)
-        {
-            if (g_state.diff.show_tree && g_state.diff.root)
-            {
-                draw_diff_node(ctx, *g_state.diff.root);
-
-                if (scroll_to_selected && g_state.diff.selection.selected_node)
-                {
-                    if (const auto it = std::find(g_state.diff.selection.visible_nodes.begin(), g_state.diff.selection.visible_nodes.end(), g_state.diff.selection.selected_node); it != g_state.diff.selection.visible_nodes.end())
-                    {
-                        const int index = static_cast<int>(std::distance(g_state.diff.selection.visible_nodes.begin(), it));
-                        nk_uint current_x, current_y;
-                        nk_group_get_scroll(ctx, "FileTree", &current_x, &current_y);
-
-                        const float row_height = 26.0f + ctx->style.window.spacing.y;
-                        const float node_y = index * row_height;
-                        const float view_h = nk_window_get_content_region(ctx).h;
-
-                        const float top_margin = row_height * 2.0f;
-                        const float bottom_margin = row_height * 2.0f;
-                        const float visible_top = static_cast<float>(current_y) + top_margin;
-                        const float visible_bottom = static_cast<float>(current_y) + view_h - bottom_margin;
-
-                        if (node_y < visible_top)
-                        {
-                            float target = node_y - top_margin;
-                            if (target < 0.0f)
-                                target = 0.0f;
-                            nk_group_set_scroll(ctx, "FileTree", current_x, (nk_uint)target);
-                        }
-                        else if (node_y + row_height > visible_bottom)
-                        {
-                            float target = node_y + row_height - view_h + bottom_margin;
-                            if (target < 0.0f)
-                                target = 0.0f;
-                            nk_group_set_scroll(ctx, "FileTree", current_x, (nk_uint)target);
-                        }
-                    }
-                    scroll_to_selected = false;
-                }
-            }
-            else
-            {
-                draw_file_node(ctx, g_state.browser.data_pack->GetFileTree());
-
-                if (scroll_to_selected && g_state.browser.selection.selected_node)
-                {
-                    if (const auto it = std::find(g_state.browser.selection.visible_nodes.begin(), g_state.browser.selection.visible_nodes.end(), g_state.browser.selection.selected_node); it != g_state.browser.selection.visible_nodes.end())
-                    {
-                        const int index = static_cast<int>(std::distance(g_state.browser.selection.visible_nodes.begin(), it));
-                        nk_uint current_x, current_y;
-                        nk_group_get_scroll(ctx, "FileTree", &current_x, &current_y);
-
-                        const float row_height = 26.0f + ctx->style.window.spacing.y;
-                        const float node_y = index * row_height;
-                        const float view_h = nk_window_get_content_region(ctx).h;
-
-                        const float top_margin = row_height * 2.0f;
-                        const float bottom_margin = row_height * 2.0f;
-                        const float visible_top = static_cast<float>(current_y) + top_margin;
-                        const float visible_bottom = static_cast<float>(current_y) + view_h - bottom_margin;
-
-                        if (node_y < visible_top)
-                        {
-                            float target = node_y - top_margin;
-                            if (target < 0.0f)
-                                target = 0.0f;
-                            nk_group_set_scroll(ctx, "FileTree", current_x, static_cast<nk_uint>(target));
-                        }
-                        else if (node_y + row_height > visible_bottom)
-                        {
-                            float target = node_y + row_height - view_h + bottom_margin;
-                            if (target < 0.0f)
-                                target = 0.0f;
-                            nk_group_set_scroll(ctx, "FileTree", current_x, static_cast<nk_uint>(target));
-                        }
-                    }
-                    scroll_to_selected = false;
-                }
-            }
-        }
-        else if (g_state.browser.data_pack && g_state.tasks.running)
-        {
-            nk_layout_row_begin(ctx, NK_STATIC, 26, 4);
-            nk_layout_row_push(ctx, 10.0f);
-            nk_spacing(ctx, 1);
-
-            nk_layout_row_push(ctx, 24.0f);
-            nk_style_button expand_style = ctx->style.button;
-            expand_style.normal = nk_style_item_color(nk_rgb(60, 60, 65));
-            expand_style.hover = nk_style_item_color(nk_rgb(60, 60, 65));
-            expand_style.text_normal = nk_rgb(150, 150, 150);
-            expand_style.rounding = 3.0f;
-
-            nk_widget_disable_begin(ctx);
-            nk_button_label_styled(ctx, &expand_style, "+");
-            nk_widget_disable_end(ctx);
-
-            nk_layout_row_push(ctx, 370.0f);
-            nk_style_button button_style = ctx->style.button;
-            button_style.normal = nk_style_item_color(nk_rgb(35, 35, 38));
-            button_style.hover = nk_style_item_color(nk_rgb(35, 35, 38));
-            button_style.active = nk_style_item_color(nk_rgb(35, 35, 38));
-            button_style.text_normal = nk_rgb(220, 220, 220);
-            button_style.text_alignment = NK_TEXT_LEFT;
-            button_style.padding = nk_vec2(8, 4);
-            button_style.rounding = 3.0f;
-            nk_button_label_styled(ctx, &button_style, g_state.browser.data_pack->GetFileTree().name.c_str());
-
-            nk_layout_row_push(ctx, 200.0f);
-            const std::string info = "0 items | " + Core::FormatSize(0);
-            nk_label_colored(ctx, info.c_str(), NK_TEXT_LEFT, nk_rgb(150, 150, 150));
-            nk_layout_row_end(ctx);
-        }
-        else if (g_state.browser.data_pack)
-        {
-            nk_layout_row_dynamic(ctx, 25, 1);
-            nk_label(ctx, "Click 'Scan Tree' to load files...", NK_TEXT_CENTERED);
-        }
-        else
-        {
-            nk_layout_row_dynamic(ctx, 25, 1);
-            nk_label(ctx, "No pack file loaded.", NK_TEXT_CENTERED);
-        }
-        nk_group_end(ctx);
+void FileBrowserPanel::Render(nk_context* ctx, bool tree_scanned, bool& scroll_to_selected) {
+    if (!nk_group_begin(ctx, "FileTree", NK_WINDOW_BORDER | NK_WINDOW_TITLE)) {
+        return;
     }
+
+    m_state.browser.selection.visible_nodes.clear();
+    m_state.diff.selection.visible_nodes.clear();
+
+    if (m_state.browser.archive && tree_scanned) {
+        if (m_state.view_mode == ViewMode::DiffTree && m_state.diff.root) {
+            EnsureDiffFilterCache();
+            DrawDiffNode(ctx, *m_state.diff.root);
+            ScrollTreeToSelected(ctx, m_state.diff.selection, scroll_to_selected);
+        } else {
+            EnsureFileFilterCache();
+            DrawFileNode(ctx, m_state.browser.archive->GetFileTree());
+            ScrollTreeToSelected(ctx, m_state.browser.selection, scroll_to_selected);
+        }
+    } else if (m_state.browser.archive && m_state.tasks.runner.IsRunning()) {
+        nk_layout_row_dynamic(ctx, 25, 1);
+        nk_label(ctx, "Scanning archive...", NK_TEXT_CENTERED);
+    } else if (m_state.browser.archive) {
+        nk_layout_row_dynamic(ctx, 25, 1);
+        nk_label(ctx, "Click 'Scan Tree' to load files...", NK_TEXT_CENTERED);
+    } else {
+        nk_layout_row_dynamic(ctx, 25, 1);
+        nk_label(ctx, "No pack file loaded.", NK_TEXT_CENTERED);
+    }
+
+    nk_group_end(ctx);
 }

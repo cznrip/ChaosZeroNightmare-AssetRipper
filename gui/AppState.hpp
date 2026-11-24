@@ -1,13 +1,11 @@
 #pragma once
 
-#include <atomic>
-#include <future>
-#include <memory>
-#include <string>
-#include <unordered_set>
-#include <vector>
+#include "archive/IArchive.hpp"
+#include "core/Core.hpp"
+#include "parsers/SpineCatalog.hpp"
+#include "services/AsyncTaskRunner.hpp"
+#include "services/FileMap.hpp"
 
-#include <GL/glew.h>
 #include <SDL.h>
 
 #ifndef NK_NUKLEAR_H_
@@ -21,18 +19,25 @@
 #endif
 #include "nuklear.h"
 
-#include "json.hpp"
-#include "core/Core.hpp"
-#include "archive/IArchive.hpp"
-#include "parsers/SpineDictionary.h"
+#include <array>
+#include <atomic>
+#include <future>
+#include <memory>
+#include <string>
+#include <unordered_set>
+#include <vector>
 
 class SpineViewer;
 
-using json = nlohmann::ordered_json;
+inline constexpr int kInitialWindowWidth = 1400;
+inline constexpr int kInitialWindowHeight = 900;
+inline constexpr uint32_t kDoubleClickDebounceMs = 250;
 
-#define INITIAL_WINDOW_WIDTH 1400
-#define INITIAL_WINDOW_HEIGHT 900
-#define DOUBLE_CLICK_TIME_MS 300
+enum class ViewMode {
+    FileTree,
+    DiffTree,
+    SpineViewer
+};
 
 template <typename NodeT>
 struct SelectionState {
@@ -41,80 +46,43 @@ struct SelectionState {
     std::unordered_set<const NodeT*> selected_nodes;
     std::unordered_set<const NodeT*> expanded_folders;
     std::vector<const NodeT*> visible_nodes;
-    Uint32 last_click_time = 0;
+    uint32_t last_click_time = 0;
+
+    void Clear() {
+        selected_node = nullptr;
+        last_clicked_node = nullptr;
+        selected_nodes.clear();
+        expanded_folders.clear();
+        visible_nodes.clear();
+        last_click_time = 0;
+    }
 };
 
-struct FileBrowserState
-{
-    std::unique_ptr<IArchive> data_pack;
+struct FileBrowserState {
+    std::unique_ptr<IArchive> archive;
     SelectionState<Core::FileNode> selection;
-    char search_buffer[256] = {};
+    std::array<char, 256> search_buffer{};
     std::string search_query;
-    int click_count = 0;
+    uint64_t tree_revision = 0;
 };
 
-enum class TaskKind { None, Scan, Extract };
-
-struct TaskState
-{
-    std::future<void> future;
-    std::atomic<float> progress = 0.f;
-    std::atomic<bool> running = false;
-    std::atomic<bool> scan_complete = false;
-    TaskKind kind = TaskKind::None;
-    std::string status = "Select a data.pack file to begin.";
+struct TaskState {
+    Services::AsyncTaskRunner runner;
+    std::atomic<bool> scan_complete{false};
 };
 
-enum class PreviewMode
-{
-    None,
-    Image,
-    DB,
-        Text
-};
-
-struct PreviewState
-{
-    GLuint texture = 0;
-    int width = 0, height = 0;
-        std::string error, text_preview, text_full;
-    bool is_json = false;
-    PreviewMode mode = PreviewMode::None;
-    const Core::FileNode* preview_node = nullptr;
-};
-
-struct DatabaseViewerState
-{
-    json json_data;
-    std::vector<std::string> column_names;
-    std::vector<std::vector<std::string>> rows;
-    std::string filename;
-    char search_buffer[128] = {};
-};
-
-struct ImageWindowState
-{
-    SDL_Window *window = nullptr;
-    SDL_Renderer *renderer = nullptr;
-    SDL_Texture *texture = nullptr;
-    int width = 0, height = 0;
-    std::string title;
-};
-
-struct ContextMenuState
-{
+struct ContextMenuState {
     bool visible = false;
-    const Core::FileNode *node = nullptr;
-    struct nk_vec2 position = {0, 0};
+    const Core::FileNode* node = nullptr;
+    struct nk_vec2 position{0.0f, 0.0f};
 };
 
-struct CommonState
-{
+struct UiOptionsState {
     bool show_options = false;
-    nk_bool export_sct_as_png = nk_true;
-    bool convert_all_sct = false;
-    nk_bool export_db_as_json = nk_true;
-    nk_bool enable_open_folder = nk_false;
+    bool export_sct_as_png = true;
+    bool export_db_as_json = true;
+    bool enable_open_folder = false;
+    bool show_credits = false;
     bool show_success_popup = false;
     std::string success_message;
     bool show_error_popup = false;
@@ -123,85 +91,62 @@ struct CommonState
     bool dragging_splitter = false;
 };
 
-struct CreditsState
-{
-    bool show_window = false;
-};
+struct SpineViewerState {
+    SpineViewerState();
+    ~SpineViewerState();
+    SpineViewerState(const SpineViewerState&) = delete;
+    SpineViewerState& operator=(const SpineViewerState&) = delete;
 
-
-struct SpineViewerState
-{
-    SpineDictionary dictionary;
-    bool show_window = false;
-    char search_buffer[256] = {};
+    SpineCatalog catalog;
+    std::array<char, 256> search_buffer{};
     std::string search_query;
     int selected_index = -1;
     std::future<void> build_future;
-    std::atomic<bool> building = false;
+    std::atomic<bool> building{false};
     std::unique_ptr<SpineViewer> viewer;
-    int selected_animation = 0, selected_skin = 0;
-    float speed = 1.f, zoom = 1.f;
-    bool playing = true, flip_x = false, flip_y = false;
+    int selected_animation = 0;
+    int selected_skin = 0;
+    float speed = 1.0f;
+    float zoom = 1.0f;
+    bool playing = true;
+    bool flip_x = false;
+    bool flip_y = false;
     Uint64 last_tick = 0;
-    std::unordered_set<std::string> expanded_categories, collapsed_bones;
+    std::unordered_set<std::string> expanded_categories;
+    std::unordered_set<std::string> collapsed_bones;
     std::vector<int> visible_indices;
     bool edit_mode = false;
-    float scale_max = 1000.f;
     std::string selected_bone;
-    char scale_max_buffer[16] = "1000";
     bool scroll_to_bone = false;
-
-    // Viewport & gizmo state
     bool autoplay = false;
     bool pma_blend = true;
-    bool pma_tex = true;
-    int bg_preset = 0; // 0=none, 1=dark, 2=mid, 3=white
+    int bg_preset = 0;
     int active_gizmo = 0;
     bool export_pending = false;
-    char bone_search_buf[128] = {};
+    std::array<char, 128> bone_search_buffer{};
     bool bone_just_reset = false;
     bool link_scale = true;
 };
 
-enum class DiffStatus
-{
-    Unchanged,
-    Added,
-    Modified,
-    Removed
-};
-
-struct DiffNode
-{
-    std::string name, full_path;
-    bool is_folder = false;
-    uint64_t size = 0;
-    std::string format;
-    DiffStatus status = DiffStatus::Unchanged;
-    std::vector<std::unique_ptr<DiffNode>> children;
-};
-
-struct DiffViewerState
-{
-    bool show_tree = false;
+struct DiffViewerState {
     std::unique_ptr<DiffNode> root;
     SelectionState<DiffNode> selection;
+    uint64_t diff_revision = 0;
 };
 
-struct AppState
-{
+struct AppState {
+    AppState();
+    ~AppState();
+
+    ViewMode view_mode = ViewMode::FileTree;
     FileBrowserState browser;
     TaskState tasks;
-    PreviewState preview;
-    DatabaseViewerState database;
-    ImageWindowState image;
     ContextMenuState context_menu;
-    CommonState common;
-    CreditsState credits;
+    UiOptionsState ui;
     SpineViewerState spine;
     DiffViewerState diff;
+
+    void LoadOptionsFromSettings();
+    void SaveOptionsToSettings() const;
+    void ResetArchiveState();
 };
-
-extern AppState g_state;
-
-void reset_app_state();

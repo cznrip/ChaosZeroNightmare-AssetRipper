@@ -1,42 +1,62 @@
-#include "parsers/SpineRenderer.hpp"
-#include "parsers/SpineDictionary.h"
 #include "gui/AppState.hpp"
-#include "gui/PreviewPanel.hpp"
+#include "core/AppSettings.hpp"
+#include "parsers/SpineRenderer.hpp"
 
-AppState g_state;
+SpineViewerState::SpineViewerState() = default;
+SpineViewerState::~SpineViewerState() = default;
 
-void reset_app_state()
-{
-    g_state.browser.data_pack.reset();
-    g_state.tasks.scan_complete = false;
-    g_state.browser.selection.selected_node = nullptr;
-    g_state.browser.selection.selected_nodes.clear();
-    g_state.browser.selection.expanded_folders.clear();
-    clear_preview();
-    g_state.browser.search_query = "";
-    memset(g_state.browser.search_buffer, 0, sizeof(g_state.browser.search_buffer));
-    memset(g_state.database.search_buffer, 0, sizeof(g_state.database.search_buffer));
-    if (g_state.spine.build_future.valid())
-        g_state.spine.build_future.wait();
-    g_state.spine.dictionary.Clear();
-    g_state.spine.show_window = false;
-    g_state.spine.selected_index = -1;
-    memset(g_state.spine.search_buffer, 0, sizeof(g_state.spine.search_buffer));
-    g_state.spine.search_query = "";
-    memset(g_state.spine.bone_search_buf, 0, sizeof(g_state.spine.bone_search_buf));
-    g_state.spine.active_gizmo = 0;
-    g_state.spine.export_pending = false;
-    g_state.spine.bone_just_reset = false;
-    g_state.spine.selected_bone = "";
-    if (g_state.spine.viewer)
-        g_state.spine.viewer->unload();
-    g_state.spine.viewer.reset();
-    g_state.spine.expanded_categories.clear();
-    g_state.common.dragging_splitter = false;
-    g_state.diff.show_tree = false;
-    g_state.diff.root.reset();
-    g_state.diff.selection.visible_nodes.clear();
-    g_state.diff.selection.expanded_folders.clear();
-    g_state.diff.selection.selected_nodes.clear();
-    g_state.diff.selection.selected_node = nullptr;
+AppState::AppState() = default;
+AppState::~AppState() = default;
+
+void AppState::LoadOptionsFromSettings() {
+    const auto& opts = Core::AppSettings::Instance().Get();
+    ui.export_sct_as_png = opts.export_sct_as_png;
+    ui.export_db_as_json = opts.export_db_as_json;
+    ui.enable_open_folder = opts.enable_open_folder;
+}
+
+void AppState::SaveOptionsToSettings() const {
+    auto& opts = Core::AppSettings::Instance().Mutable();
+    opts.export_sct_as_png = ui.export_sct_as_png;
+    opts.export_db_as_json = ui.export_db_as_json;
+    opts.enable_open_folder = ui.enable_open_folder;
+    Core::AppSettings::Instance().Save();
+}
+
+void AppState::ResetArchiveState() {
+    view_mode = ViewMode::FileTree;
+    browser.archive.reset();
+    tasks.scan_complete.store(false, std::memory_order_relaxed);
+    browser.selection.Clear();
+    browser.search_query.clear();
+    browser.search_buffer.fill('\0');
+    ++browser.tree_revision;
+
+    if (spine.build_future.valid()) {
+        spine.build_future.wait();
+    }
+    spine.catalog.Clear();
+    spine.selected_index = -1;
+    spine.search_buffer.fill('\0');
+    spine.search_query.clear();
+    spine.bone_search_buffer.fill('\0');
+    spine.active_gizmo = 0;
+    spine.export_pending = false;
+    spine.bone_just_reset = false;
+    spine.selected_bone.clear();
+    if (spine.viewer) {
+        spine.viewer->Unload();
+    }
+    spine.viewer.reset();
+    spine.expanded_categories.clear();
+    spine.collapsed_bones.clear();
+    spine.visible_indices.clear();
+
+    ui.dragging_splitter = false;
+    context_menu.visible = false;
+    context_menu.node = nullptr;
+
+    diff.root.reset();
+    diff.selection.Clear();
+    ++diff.diff_revision;
 }
