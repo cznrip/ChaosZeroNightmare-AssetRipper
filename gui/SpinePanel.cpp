@@ -13,7 +13,8 @@
 
 #include "core/Core.hpp"
 #include "core/FileTree.hpp"
-#include "core/DialogPaths.hpp"
+#include "core/AssetFormat.hpp"
+#include "core/FileDialogs.hpp"
 #include "parsers/SctParser.hpp"
 #include "parsers/ScspParser.hpp"
 #include "parsers/SpineCatalog.hpp"
@@ -229,13 +230,7 @@ namespace {
         if (entry.atlas_node)
         {
             std::vector<uint8_t> data = g_state.browser.data_pack->GetFileData(*entry.atlas_node);
-            std::string atlas_str(data.begin(), data.end());
-            size_t p = 0;
-            while ((p = atlas_str.find(".sct", p)) != std::string::npos)
-            {
-                atlas_str.replace(p, 4, ".png");
-                p += 4;
-            }
+            std::string atlas_str = Core::RewriteAtlasExtensions(std::string_view(reinterpret_cast<const char *>(data.data()), data.size()));
             std::ofstream out(dest + "/" + entry.atlas_node->name, std::ios::binary);
             out << atlas_str;
             exported++;
@@ -502,7 +497,7 @@ void draw_spine_panel(nk_context *ctx, float content_height, int window_width)
                         const auto &entry = spine_entries_inline[g_state.spine.selected_index];
                         try
                         {
-                            const std::string dest = DialogPaths::SelectFolder(DialogPaths::Slot::Extract, "Select destination folder");
+                            const std::string dest = Core::FileDialogs::SelectFolder(Core::DialogSlot::Extract, "Select destination folder");
                             if (!dest.empty())
                             {
                                 int exported = 0;
@@ -768,7 +763,7 @@ void draw_spine_panel(nk_context *ctx, float content_height, int window_width)
                     g_state.spine.export_pending = false;
                     try
                     {
-                        const std::string dest = DialogPaths::SelectFolder(DialogPaths::Slot::Extract, "Select destination folder");
+                        const std::string dest = Core::FileDialogs::SelectFolder(Core::DialogSlot::Extract, "Select destination folder");
                         if (!dest.empty() && g_state.spine.selected_index >= 0)
                         {
                             const auto &entry = spine_entries_inline[g_state.spine.selected_index];

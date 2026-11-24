@@ -1,52 +1,97 @@
 #pragma once
-#include <string>
+
+#include <chrono>
+#include <ctime>
+#include <format>
 #include <fstream>
 #include <mutex>
-#include <chrono>
-#include <iomanip>
-#include <sstream>
+#include <string>
+#include <string_view>
 
 namespace Logger {
-    namespace Internal {
-        inline std::mutex& mutexRef() {
-            static std::mutex m; return m;
+
+    class FileSink {
+    public:
+        static FileSink& Instance() {
+            static FileSink instance;
+            return instance;
         }
-        inline std::string nowTimestamp() {
-            using namespace std::chrono;
-            auto now = system_clock::now();
-            auto t = system_clock::to_time_t(now);
-            auto tm = *std::localtime(&t);
-            std::ostringstream oss;
-            oss << std::put_time(&tm, "%Y-%m-%d %H:%M:%S");
-            return oss.str();
+
+        void Write(std::string_view level, std::string_view msg) {
+            std::lock_guard lock(m_mutex);
+            EnsureOpen();
+            if (!m_stream.is_open()) return;
+            m_stream << FormatTimestamp() << " [" << level << "] " << msg << '\n';
+            m_stream.flush();
         }
-        inline void writeLine(const char* level, const std::string& msg) {
-            std::lock_guard<std::mutex> lock(mutexRef());
-            std::ofstream out("czn_ripper.log", std::ios::app);
-            if (!out.is_open()) return;
-            out << nowTimestamp() << " [" << level << "] " << msg << "\n";
-            out.flush();
+
+        void Flush() {
+            std::lock_guard lock(m_mutex);
+            if (m_stream.is_open()) {
+                m_stream.flush();
+            }
         }
+
+        ~FileSink() {
+            if (m_stream.is_open()) {
+                m_stream.flush();
+            }
+        }
+
+    private:
+        FileSink() = default;
+
+        void EnsureOpen() {
+            if (!m_stream.is_open()) {
+                m_stream.open("czn_ripper.log", std::ios::app);
+            }
+        }
+
+        static std::string FormatTimestamp() {
+            const auto now = std::chrono::system_clock::now();
+            const std::time_t t = std::chrono::system_clock::to_time_t(now);
+            std::tm local_tm{};
+#ifdef _WIN32
+            localtime_s(&local_tm, &t);
+#else
+            localtime_r(&t, &local_tm);
+#endif
+            return std::format(
+                "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+                local_tm.tm_year + 1900,
+                local_tm.tm_mon + 1,
+                local_tm.tm_mday,
+                local_tm.tm_hour,
+                local_tm.tm_min,
+                local_tm.tm_sec);
+        }
+
+        std::mutex m_mutex;
+        std::ofstream m_stream;
+    };
+
+    inline void Info(std::string_view message) {
+        FileSink::Instance().Write("INFO", message);
     }
 
-    inline void Info(const std::string& message) {
-        Internal::writeLine("INFO", message);
+    inline void Error(std::string_view message) {
+        FileSink::Instance().Write("ERROR", message);
     }
-    inline void Error(const std::string& message) {
-        Internal::writeLine("ERROR", message);
-    }
+
     inline void Flush() {
-        std::lock_guard lock(Internal::mutexRef());
-        if (std::ofstream out("czn_ripper.log", std::ios::app); out.is_open()) out.flush();
+        FileSink::Instance().Flush();
     }
-}
 
-inline void LogInfo(const std::string& message) {
+} // namespace Logger
+
+inline void LogInfo(std::string_view message) {
     Logger::Info(message);
 }
-inline void LogError(const std::string& message) {
+
+inline void LogError(std::string_view message) {
     Logger::Error(message);
 }
+
 inline void LogFlush() {
     Logger::Flush();
 }

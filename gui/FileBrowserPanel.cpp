@@ -4,7 +4,7 @@
 #include "core/AppInfo.hpp"
 #include "core/Core.hpp"
 #include "core/FileTree.hpp"
-#include "core/DialogPaths.hpp"
+#include "core/FileDialogs.hpp"
 
 #include "json.hpp"
 #include "nuklear.h"
@@ -277,7 +277,7 @@ namespace {
     {
         try
         {
-            const std::string picked_path = DialogPaths::OpenFile(DialogPaths::Slot::Export, "Select an older filemap.json", {"JSON Files", "*.json", "All Files", "*.*"});
+            const std::string picked_path = Core::FileDialogs::OpenFile(Core::DialogSlot::Export, "Select an older filemap.json", {"JSON Files", "*.json", "All Files", "*.*"});
             if (picked_path.empty())
             {
                 return false;
@@ -588,7 +588,7 @@ void export_to_json()
 {
     try
     {
-        if (const std::string save_path = DialogPaths::SaveFile("Export File Map", "filemap.json", {"JSON Files", "*.json", "All Files", "*.*"}); !save_path.empty())
+        if (const std::string save_path = Core::FileDialogs::SaveFile("Export File Map", "filemap.json", {"JSON Files", "*.json", "All Files", "*.*"}); !save_path.empty())
         {
             if (std::ofstream out(save_path); out.is_open())
             {

@@ -5,8 +5,8 @@
 #include "gui/PreviewPanel.hpp"
 #include "gui/UIHelpers.hpp"
 #include "core/AppInfo.hpp"
-#include "core/RipperOptions.hpp"
-#include "core/DialogPaths.hpp"
+#include "core/AppSettings.hpp"
+#include "core/FileDialogs.hpp"
 
 namespace {
     nk_style_button make_toggle_style(const nk_context *ctx, const bool is_on)
@@ -33,19 +33,19 @@ namespace {
 
 void save_options_to_ini()
 {
-    RipperOptions options = LoadRipperOptions();
-    options.exportSctAsPng = (g_state.common.export_sct_as_png != nk_false);
-    options.exportDbAsJson = (g_state.common.export_db_as_json != nk_false);
-    options.enableOpenFolder = (g_state.common.enable_open_folder != nk_false);
-    SaveRipperOptions(options);
+    auto &options = Core::AppSettings::Instance().Mutable();
+    options.export_sct_as_png = (g_state.common.export_sct_as_png != nk_false);
+    options.export_db_as_json = (g_state.common.export_db_as_json != nk_false);
+    options.enable_open_folder = (g_state.common.enable_open_folder != nk_false);
+    Core::AppSettings::Instance().Save();
 }
 
 void load_options_from_ini()
 {
-    const RipperOptions options = LoadRipperOptions();
-    g_state.common.export_sct_as_png = options.exportSctAsPng ? nk_true : nk_false;
-    g_state.common.export_db_as_json = options.exportDbAsJson ? nk_true : nk_false;
-    g_state.common.enable_open_folder = options.enableOpenFolder ? nk_true : nk_false;
+    const auto &options = Core::AppSettings::Instance().Get();
+    g_state.common.export_sct_as_png = options.export_sct_as_png ? nk_true : nk_false;
+    g_state.common.export_db_as_json = options.export_db_as_json ? nk_true : nk_false;
+    g_state.common.enable_open_folder = options.enable_open_folder ? nk_true : nk_false;
 }
 
 void draw_options_popup(nk_context *ctx, const int window_width, const int window_height)
@@ -294,7 +294,7 @@ void draw_context_menu(nk_context *ctx)
             {
                 try
                 {
-                    const std::string save_path = DialogPaths::SaveFile("Extract File", g_state.context_menu.node->name, {"All Files", "*.*"});
+                    const std::string save_path = Core::FileDialogs::SaveFile("Extract File", g_state.context_menu.node->name, {"All Files", "*.*"});
                     if (!save_path.empty())
                     {
                         const std::vector<uint8_t> file_data = g_state.browser.data_pack->GetFileData(*g_state.context_menu.node);

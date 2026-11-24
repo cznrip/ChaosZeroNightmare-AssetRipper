@@ -1,54 +1,15 @@
 #include "gui/UIHelpers.hpp"
+#include "core/AssetFormat.hpp"
 #include <algorithm>
 
-bool is_sct_format(const std::string &ext)
-{
-    const auto e = Core::ToLower(ext);
-    return e == ".sct" || e == ".sct2";
-}
-
-bool is_db_file(const std::string &ext)
-{
-    return Core::ToLower(ext) == ".db";
-}
-
-bool is_scsp_file(const std::string &ext)
-{
-    return Core::ToLower(ext) == ".scsp";
-}
-
-bool is_previewable_format(const std::string &ext)
-{
-    const auto e = Core::ToLower(ext);
-    return e == ".png" || e == ".jpg" || e == ".jpeg" ||
-           e == ".bmp" || e == ".tga" || is_sct_format(e);
-}
-
-bool is_animated_webp(const std::string &ext)
-{
-    return Core::ToLower(ext) == ".webp";
-}
-
-bool is_atlas_file(const std::string &ext)
-{
-    return Core::ToLower(ext) == ".atlas";
-}
-
-bool is_json_file(const std::string &ext)
-{
-    const auto e = Core::ToLower(ext);
-    return e == ".json" || e == ".battletemplate" || e == ".config" ||
-           e == ".sfgm" || e == ".camera" || e == ".setting" ||
-           e == ".sract" || e == ".srmd" || e == ".srcs" ||
-           e == ".monstertest" || e == ".dat";
-}
-
-bool is_text_file(const std::string &ext)
-{
-    const auto e = Core::ToLower(ext);
-    return e == ".txt" || e == ".cfx" || is_atlas_file(e) ||
-           e == ".fnt" || e == ".srt" || e == ".bat";
-}
+bool is_sct_format(const std::string &ext) { return Core::IsSctExtension(ext); }
+bool is_db_file(const std::string &ext) { return Core::IsDatabaseExtension(ext); }
+bool is_scsp_file(const std::string &ext) { return Core::IsScspExtension(ext); }
+bool is_previewable_format(const std::string &ext) { return Core::IsPreviewableImageExtension(ext); }
+bool is_animated_webp(const std::string &ext) { return Core::IsAnimatedWebPExtension(ext); }
+bool is_atlas_file(const std::string &ext) { return Core::IsAtlasExtension(ext); }
+bool is_json_file(const std::string &ext) { return Core::IsJsonExtension(ext); }
+bool is_text_file(const std::string &ext) { return Core::IsTextExtension(ext); }
 
 bool matches_search(const Core::FileNode &node, const std::string &query)
 {

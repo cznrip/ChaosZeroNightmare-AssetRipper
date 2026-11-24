@@ -6,7 +6,7 @@
 
 #include "core/Core.hpp"
 #include "core/FileTree.hpp"
-#include "core/DialogPaths.hpp"
+#include "core/FileDialogs.hpp"
 #include "archive/IArchive.hpp"
 #include "gui/AppState.hpp"
 #include "gui/FileBrowserPanel.hpp"
@@ -38,7 +38,7 @@ void draw_toolbar(nk_context *ctx)
     {
         try
         {
-            const std::string selected_path = DialogPaths::OpenFile(DialogPaths::Slot::Open, "Select an archive or manifest file",
+            const std::string selected_path = Core::FileDialogs::OpenFile(Core::DialogSlot::Open, "Select an archive or manifest file",
                                                                     {"Pack / Manifest Files", "*.pack;*.ssra", "All Files", "*.*"});
             if (!selected_path.empty())
             {
@@ -75,7 +75,7 @@ void draw_toolbar(nk_context *ctx)
         {
             try
             {
-                const std::string selected_path = DialogPaths::SelectFolder(DialogPaths::Slot::Open, "Select a folder to view");
+                const std::string selected_path = Core::FileDialogs::SelectFolder(Core::DialogSlot::Open, "Select a folder to view");
                 if (!selected_path.empty())
                 {
                     const std::wstring wpath = Core::Utf8ToWString(selected_path);
@@ -191,7 +191,7 @@ void draw_toolbar(nk_context *ctx)
     {
         try
         {
-            const std::string dest_str = DialogPaths::SelectFolder(DialogPaths::Slot::Extract, "Select destination folder");
+            const std::string dest_str = Core::FileDialogs::SelectFolder(Core::DialogSlot::Extract, "Select destination folder");
             if (!dest_str.empty())
             {
                 std::wstring dest_path = Core::Utf8ToWString(dest_str);
@@ -229,7 +229,7 @@ void draw_toolbar(nk_context *ctx)
 
         try
         {
-            if (const std::string dest_str = DialogPaths::SelectFolder(DialogPaths::Slot::Extract, "Select destination folder"); !dest_str.empty())
+            if (const std::string dest_str = Core::FileDialogs::SelectFolder(Core::DialogSlot::Extract, "Select destination folder"); !dest_str.empty())
             {
                 std::wstring dest_path = Core::Utf8ToWString(dest_str);
                 g_state.tasks.running = true;

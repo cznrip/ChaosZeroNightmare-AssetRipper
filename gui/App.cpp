@@ -12,9 +12,9 @@
 #include <SDL_image.h>
 
 #include "core/AppInfo.hpp"
+#include "core/AppSettings.hpp"
 #include "core/Core.hpp"
 #include "core/FileTree.hpp"
-#include "core/RipperOptions.hpp"
 #include "gui/AppState.hpp"
 #include "gui/Popups.hpp"
 #include "gui/PreviewPanel.hpp"

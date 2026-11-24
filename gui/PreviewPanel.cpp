@@ -6,7 +6,8 @@
 #include "parsers/SctParser.hpp"
 #include "parsers/DbParser.hpp"
 #include "parsers/ScspParser.hpp"
-#include "core/DialogPaths.hpp"
+#include "core/AssetFormat.hpp"
+#include "core/FileDialogs.hpp"
 
 #include <GL/glew.h>
 #include <SDL_image.h>
@@ -309,7 +310,7 @@ namespace {
         {
             const std::string default_name = Core::ReplaceExtension(node.name, ".json");
 
-            if (const std::string save_path = DialogPaths::SaveFile(dialog_title, default_name, {"JSON Files", "*.json", "All Files", "*.*"}); !save_path.empty())
+            if (const std::string save_path = Core::FileDialogs::SaveFile(dialog_title, default_name, {"JSON Files", "*.json", "All Files", "*.*"}); !save_path.empty())
             {
                 std::vector<uint8_t> file_data = g_state.browser.data_pack->GetFileData(node);
 
@@ -600,7 +601,7 @@ void export_file_as_png(const Core::FileNode &node)
         const auto &info = std::get<Core::FileInfo>(node.data);
         const std::string default_name = Core::ReplaceExtension(node.name, ".png");
 
-        if (const std::string save_path = DialogPaths::SaveFile("Export as PNG", default_name, {"PNG Files", "*.png", "All Files", "*.*"}); !save_path.empty())
+        if (const std::string save_path = Core::FileDialogs::SaveFile("Export as PNG", default_name, {"PNG Files", "*.png", "All Files", "*.*"}); !save_path.empty())
         {
             const std::vector<uint8_t> file_data = g_state.browser.data_pack->GetFileData(node);
             std::vector<uint8_t> png_data;
@@ -633,7 +634,7 @@ void export_file_as_sct(const Core::FileNode &node)
 {
     try
     {
-        if (const std::string save_path = DialogPaths::SaveFile("Export as SCT", node.name, {"SCT Files", "*.sct;*.sct2", "All Files", "*.*"}); !save_path.empty())
+        if (const std::string save_path = Core::FileDialogs::SaveFile("Export as SCT", node.name, {"SCT Files", "*.sct;*.sct2", "All Files", "*.*"}); !save_path.empty())
         {
             const std::vector<uint8_t> file_data = g_state.browser.data_pack->GetFileData(node);
             std::ofstream out(save_path, std::ios::binary);
@@ -848,7 +849,7 @@ void draw_preview_panel(nk_context *ctx, float right_width, float content_height
                     {
                         const std::string base_name = g_state.preview.preview_node ? g_state.preview.preview_node->name : "output";
                         const std::string default_name = Core::ReplaceExtension(base_name, ".json");
-                        if (const std::string save_path = DialogPaths::SaveFile("Save JSON", default_name, {"JSON Files", "*.json", "All Files", "*.*"}); !save_path.empty())
+                        if (const std::string save_path = Core::FileDialogs::SaveFile("Save JSON", default_name, {"JSON Files", "*.json", "All Files", "*.*"}); !save_path.empty())
                         {
                             if (std::ofstream out(save_path); out.is_open())
                             {
@@ -913,18 +914,13 @@ void draw_preview_panel(nk_context *ctx, float right_width, float content_height
 
                     if (is_atlas)
                     {
-                        size_t pos = 0;
-                        while ((pos = data_to_save.find(".sct", pos)) != std::string::npos)
-                        {
-                            data_to_save.replace(pos, 4, ".png");
-                            pos += 4;
-                        }
+                        data_to_save = Core::RewriteAtlasExtensions(data_to_save);
                     }
 
                     const std::string base_name = g_state.preview.preview_node ? g_state.preview.preview_node->name : "output";
                     const std::string default_name = Core::ReplaceExtension(base_name, is_atlas ? ".atlas" : ".txt");
 
-                    const std::string save_path = DialogPaths::SaveFile(is_atlas ? "Save Atlas" : "Save Text", default_name,
+                    const std::string save_path = Core::FileDialogs::SaveFile(is_atlas ? "Save Atlas" : "Save Text", default_name,
                                                                         is_atlas ? std::vector<std::string>{"Atlas Files", "*.atlas", "Text Files", "*.txt", "All Files", "*.*"}
                                                                                  : std::vector<std::string>{"Text Files", "*.txt", "All Files", "*.*"});
 

@@ -402,13 +402,7 @@ void DataPack::ScanLocalDirectory(std::atomic<float>& progress)
 
 void DataPack::ScanEncrypted(std::atomic<float> &progress)
 {
-    std::array<uint8_t, Core::KEY_SIZE> key{};
-    uint32_t current = Core::INITIAL;
-    for (size_t i = 0; i < Core::KEY_SIZE; ++i)
-    {
-        current = (current * Core::MULT) & 0x7FFFFFFF;
-        key[i] = (current >> 16) & 0xFF;
-    }
+    const auto &key = Core::kDataPackXorKey;
 
     uint64_t cursor = 4; // entries can't start before offset 4
     uint64_t next_progress_cursor = 0;
@@ -441,7 +435,7 @@ void DataPack::ScanEncrypted(std::atomic<float> &progress)
         for (size_t pos = 0; pos < available && (cursor + pos) < total_file_size; ++pos)
         {
             const uint64_t abs_pos = cursor + pos;
-            if (const uint8_t decrypted_byte = block[pos] ^ key[abs_pos % Core::KEY_SIZE]; decrypted_byte == 0x02)
+            if (const uint8_t decrypted_byte = block[pos] ^ key[abs_pos % Core::kDataPackKeySize]; decrypted_byte == 0x02)
             {
                 candidate_pos = pos;
                 break;
