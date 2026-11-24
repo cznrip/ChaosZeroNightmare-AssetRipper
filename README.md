@@ -22,6 +22,7 @@ And export either all files or only selected files and folders, depending on you
 2) Click `Scan Tree` to scan the pack and build the game resource tree.
 
 ### SSRA archives
+`.ssra` archives are standalone (independent from `data.pack`).
 1) Click `Open Pack` and select a `manifest.ssra` directly, usually inside the game's `gameres` directory.
 2) Keep the corresponding `.ssrc` files in the sibling `chunks` directory, for example `gameres\chunks`.
 3) Click `Scan Tree` to scan the manifest and its available chunks.

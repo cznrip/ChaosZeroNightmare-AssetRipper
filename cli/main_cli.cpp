@@ -1,652 +1,549 @@
 #define NOMINMAX
 #define WIN32_LEAN_AND_MEAN
 
+#include "archive/ArchiveFactory.hpp"
+#include "archive/IArchive.hpp"
+#include "core/AppInfo.hpp"
+#include "core/Core.hpp"
+#include "core/FileTree.hpp"
+#include "core/Logger.hpp"
+#include "core/ProgressReporter.hpp"
+#include "services/AssetExporter.hpp"
+
 #include <algorithm>
-#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
+#include <format>
 #include <functional>
-#include <future>
-#include <iomanip>
 #include <iostream>
 #include <memory>
-#include <set>
+#include <span>
 #include <string>
+#include <string_view>
+#include <unordered_set>
 #include <vector>
 
 #ifdef _WIN32
-#include <windows.h>
-#include <shellapi.h>
 #include <io.h>
+#include <shellapi.h>
+#include <windows.h>
 #else
 #include <unistd.h>
 #endif
 
-#include "core/Core.hpp"
-#include "core/FileTree.hpp"
-#include "core/Logger.hpp"
-#include "archive/ArchiveFactory.hpp"
-#include "archive/IArchive.hpp"
-#include "services/AssetExporter.hpp"
+namespace {
 
-// //////////////////////////////////////////////////////////////////////////////////////////////////
-// //////////////////////////////////////////////////////////////////////////////////////////////////
-// Constants and global state
+    /** Exit codes allowing scripts to distinguish partial vs. complete failure. */
+    enum class ExitCode : int {
+        Ok = 0,
+        Usage = 1,
+        PackFailed = 2,
+        PartialFailure = 3,
+        AllFailed = 4
+    };
 
-// Exit codes. Scripts can tell "nothing worked" apart from "most of it worked".
-static constexpr int CLI_EXIT_OK = 0;
-static constexpr int CLI_EXIT_USAGE = 1;
-static constexpr int CLI_EXIT_PACK_FAILED = 2;
-static constexpr int CLI_EXIT_PARTIAL_FAILURE = 3;
-static constexpr int CLI_EXIT_ALL_FAILED = 4;
+    enum class ParseStatus {
+        Ok,
+        HelpPrinted,
+        Error
+    };
 
-// Returned by parse_args when help was printed, so main can exit successfully without doing any work.
-static constexpr int CLI_PARSE_HELP = -1;
+    /** Parsed command-line configuration for a single CLI invocation. */
+    struct CliOptions {
+        std::string pack;
+        std::string out;
+        std::vector<std::string> folders;
+        bool convert_sct_to_png = true;
+        bool convert_db_to_json = true;
+        bool verbose = false;
+        bool quiet = false;
+    };
 
-static constexpr int PROGRESS_BAR_WIDTH = 30;
-static constexpr int PROGRESS_POLL_MS = 100;
-// When stdout is redirected we cannot redraw in place, so only emit a line every this many percent.
-static constexpr int PROGRESS_FILE_STEP_PERCENT = 5;
-
-// Set once in main, then read by the progress functions to choose between an in-place bar and plain lines.
-static bool g_stdout_is_tty = false;
-// Set while parsing -q, then read by the progress functions to suppress their output entirely.
-static bool g_quiet = false;
-
-/** Parsed command line for a single CLI run. */
-struct CliOptions
-{
-    /** UTF-8 path to data.pack, a manifest.ssra, or an unpacked directory. */
-    std::string pack;
-    /** UTF-8 path to the destination directory. Created if it does not exist. */
-    std::string out;
-    /** Normalized archive-relative folder (or file) paths to extract, in the order given, without duplicates. */
-    std::vector<std::string> folders;
-    /** Convert .sct / .sct2 textures to .png and rewrite .atlas texture references to match. */
-    bool convert_sct_to_png = true;
-    /** Convert encrypted .db files to .json. */
-    bool convert_db_to_json = true;
-    /** Print every extracted file instead of just a progress bar. */
-    bool verbose = false;
-};
-
-/** One requested folder that was found in the archive, with its measured weight. */
-struct ResolvedFolder
-{
-    /** The matching node in the archive's file tree. Its full_path is the path the user asked for. */
-    const Core::FileNode* node;
-    /** Total bytes of every file under the node, used to weight the overall percentage. */
-    uint64_t bytes;
-    /** Number of files under the node. */
-    uint32_t files;
-};
-
-// //////////////////////////////////////////////////////////////////////////////////////////////////
-// //////////////////////////////////////////////////////////////////////////////////////////////////
-// Path helpers
-
-/**
- * Normalizes an archive path argument into the form the file tree stores in `full_path`: forward slashes, no leading or trailing slash, no empty segments.
- * @param raw The raw --folder value as typed by the user.
- * @returns The normalized path, or an empty string when nothing usable is left.
- */
-static std::string normalize_archive_path(const std::string& raw)
-{
-    std::string normalized;
-    normalized.reserve(raw.size());
-
-    bool last_was_slash = true; // Treat the start as a slash so a leading separator gets dropped.
-    for (char c : raw)
-    {
-        const char ch = (c == '\\') ? '/' : c;
-        if (ch == '/')
-        {
-            if (last_was_slash)
-                continue;
-            last_was_slash = true;
-            normalized.push_back('/');
-            continue;
-        }
-        last_was_slash = false;
-        normalized.push_back(ch);
-    }
-
-    while (!normalized.empty() && normalized.back() == '/')
-        normalized.pop_back();
-
-    return normalized;
-}
-
-/**
- * Builds the output base to hand to `IArchive::Extract` so the archive path is preserved in full. Extract appends only the node's own name, so passing the
- * node's parent prefix makes the final path come out as <dest>/<full archive path>.
- * @param dest The user's --out directory.
- * @param node_full_path The node's archive-relative full_path.
- * @returns The directory to pass as Extract's output_path.
- */
-static std::filesystem::path output_base_for(const std::filesystem::path& dest, const std::string& node_full_path)
-{
-    const size_t slash = node_full_path.find_last_of('/');
-    if (slash == std::string::npos)
-        return dest;
-    return dest / std::filesystem::path(Core::Utf8ToWString(node_full_path.substr(0, slash)));
-}
-
-// //////////////////////////////////////////////////////////////////////////////////////////////////
-// //////////////////////////////////////////////////////////////////////////////////////////////////
-// Progress reporting
-
-/**
- * Redraws the progress bar in place on a console, or emits sparse plain lines when stdout is redirected. Safe to use a carriage return here because the
- * extraction path logs to czn_ripper.log rather than stdout. The one exception is SCTParser's std::cerr writes on a hard astcenc failure, which will smear
- * the bar. That is acceptable since those signal a real decode problem worth seeing.
- * @param label Short prefix such as "Scanning".
- * @param fraction Progress in the range [0, 1].
- * @param suffix Trailing detail such as "total 42%", or empty for none.
- * @param last_percent The last percentage this operation printed, updated in place. Only used when stdout is redirected.
- */
-static void draw_progress(const std::string& label, float fraction, const std::string& suffix, int& last_percent)
-{
-    if (g_quiet)
-        return;
-
-    fraction = std::min(1.0f, std::max(0.0f, fraction));
-    const int percent = static_cast<int>(fraction * 100.0f + 0.5f);
-
-    if (!g_stdout_is_tty)
-    {
-        if (percent == last_percent || (percent % PROGRESS_FILE_STEP_PERCENT) != 0)
-            return;
-        last_percent = percent;
-        std::cout << label << " " << percent << "%";
-        if (!suffix.empty())
-            std::cout << " " << suffix;
-        std::cout << "\n";
-        return;
-    }
-
-    const int filled = static_cast<int>(fraction * PROGRESS_BAR_WIDTH + 0.5f);
-    std::string bar(static_cast<size_t>(filled), '#');
-    bar.append(static_cast<size_t>(PROGRESS_BAR_WIDTH - filled), '-');
-
-    // The trailing spaces erase leftovers from a previously longer line.
-    std::cout << '\r' << label << " [" << bar << "] " << std::setw(3) << percent << "%  " << suffix << "        " << std::flush;
-}
-
-/**
- * Runs an operation and turns any escaping exception into a reported failure, so one bad folder does not abandon the rest of the run.
- * @param work The operation to run.
- * @returns True when the operation completed without throwing.
- */
-static bool run_guarded(const std::function<void()>& work)
-{
-    try
-    {
-        work();
-    }
-    catch (const std::exception& e)
-    {
-        std::cerr << "  error: " << e.what() << "\n";
-        LogError(std::string("CLI operation failed: ") + e.what());
-        return false;
-    }
-    catch (...)
-    {
-        std::cerr << "  error: unknown exception\n";
-        LogError("CLI operation failed with an unknown exception");
-        return false;
-    }
-    return true;
-}
-
-/**
- * Runs a blocking archive operation on a worker thread while the calling thread polls its progress atomic and redraws the bar. The archive API has no
- * progress callback, so polling is the only way to show movement. Only one worker runs at a time, so the pack's sliding memory map is never shared.
- * @param label Progress bar label.
- * @param progress The atomic the operation writes into.
- * @param suffix_fn Called on each tick to build the bar's trailing text.
- * @param work The blocking operation.
- * @returns True when the operation completed without throwing.
- */
-static bool run_with_progress(const std::string& label, std::atomic<float>& progress, const std::function<std::string()>& suffix_fn, const std::function<void()>& work)
-{
-    progress = 0.f;
-    int last_percent = -1;
-    std::future<void> future = std::async(std::launch::async, work);
-
-    while (future.wait_for(std::chrono::milliseconds(PROGRESS_POLL_MS)) != std::future_status::ready)
-        draw_progress(label, progress.load(), suffix_fn(), last_percent);
-
-    draw_progress(label, 1.0f, suffix_fn(), last_percent);
-    if (!g_quiet && g_stdout_is_tty)
-        std::cout << "\n";
-
-    return run_guarded([&future] { future.get(); });
-}
-
-// //////////////////////////////////////////////////////////////////////////////////////////////////
-// //////////////////////////////////////////////////////////////////////////////////////////////////
-// Argument parsing
-
-/**
- * Collects the process arguments as UTF-8. On Windows the ANSI argv would mangle paths outside the active code page, so the wide command line is used instead.
- * @param argc Argument count from main.
- * @param argv Argument vector from main.
- * @returns The arguments after argv[0], each encoded as UTF-8.
- */
-static std::vector<std::string> collect_args_utf8(int argc, char** argv)
-{
-    std::vector<std::string> args;
-#ifdef _WIN32
-    int wargc = 0;
-    LPWSTR* wargv = CommandLineToArgvW(GetCommandLineW(), &wargc);
-    if (wargv != nullptr)
-    {
-        for (int i = 1; i < wargc; ++i)
-            args.push_back(Core::WStringToUtf8(wargv[i]));
-        LocalFree(wargv);
-        return args;
-    }
-#endif
-    for (int i = 1; i < argc; ++i)
-        args.push_back(argv[i]);
-    return args;
-}
-
-/** Prints the usage text. */
-static void print_help()
-{
-    std::cout <<
-        "ChaosZeroNightmareRipper-CLI - headless extractor for Chaos Zero Nightmare data.pack\n"
-        "\n"
-        "Usage:\n"
-        "  czn-cli --pack <path> --out <dir> --folder <archive/path> [--folder ...] [options]\n"
-        "\n"
-        "Required:\n"
-        "  -p, --pack <path>      data.pack, manifest.ssra, or an unpacked directory\n"
-        "  -o, --out <dir>        destination directory (created if missing)\n"
-        "  -f, --folder <path>    archive-relative folder or file to extract; repeatable\n"
-        "\n"
-        "Options:\n"
-        "      --no-png           keep .sct / .sct2 as-is instead of converting to .png\n"
-        "      --no-json          keep .db as-is instead of converting to .json\n"
-        "  -v, --verbose          print each extracted file\n"
-        "  -q, --quiet            suppress the progress bar; print only the summary\n"
-        "  -h, --help             show this help and exit\n"
-        "\n"
-        "Notes:\n"
-        "  Output preserves the full archive path. --out D:\\out --folder gameres/spine\n"
-        "  writes D:\\out\\gameres\\spine\\...\n"
-        "  .scsp files are always converted to .json.\n"
-        "  Settings in czn_ripper.ini are ignored. Use the flags above.\n"
-        "  Prefer a short destination path. Deep archive paths can exceed the Windows\n"
-        "  MAX_PATH limit when the destination is already long.\n"
-        "\n"
-        "Exit codes report whether each requested folder was FOUND and extracted. Errors\n"
-        "on individual files are logged and skipped without changing the exit code, so\n"
-        "check czn_ripper.log in the working directory to confirm a clean run.\n"
-        "  0  every requested folder was found and extracted\n"
-        "  1  usage error\n"
-        "  2  pack could not be opened or scanned\n"
-        "  3  some requested folders were missing or failed\n"
-        "  4  none of the requested folders could be extracted\n"
-        "\n"
-        "Example:\n"
-        "  ChaosZeroNightmareRipper-CLI --pack \"C:\\Games\\ChaosZeroNightmare\\bin\\appdata\\cznlive\\data.pack\"\n"
-        "          --out D:\\czn_assets\n"
-        "          --folder card --folder story --folder cutin --folder collapse\n";
-}
-
-/**
- * Parses the command line into a CliOptions, printing its own diagnostics.
- * @param args UTF-8 arguments, excluding the program name.
- * @param out_options Filled in on success.
- * @returns CLI_EXIT_OK on success, CLI_PARSE_HELP when help was printed, CLI_EXIT_USAGE on a bad command line.
- */
-static int parse_args(const std::vector<std::string>& args, CliOptions& out_options)
-{
-    std::set<std::string> seen_folders;
-
-    for (size_t i = 0; i < args.size(); ++i)
-    {
-        std::string arg = args[i];
-
-        std::string inline_value;
-        bool has_inline = false;
-        if (arg.rfind("--", 0) == 0)
-        {
-            const size_t equals = arg.find('=');
-            if (equals != std::string::npos)
-            {
-                inline_value = arg.substr(equals + 1);
-                arg = arg.substr(0, equals);
-                has_inline = true;
-            }
-        }
-
-        // Pulls a flag's value from either "--flag value" or "--flag=value".
-        auto take_value = [&](const char* flag_name, std::string& dest) -> bool
-        {
-            if (has_inline)
-            {
-                dest = inline_value;
-            }
-            else if (i + 1 < args.size())
-            {
-                dest = args[++i];
-            }
-            else
-            {
-                std::cerr << "error: " << flag_name << " needs a value\n";
-                return false;
-            }
-
-            if (dest.empty())
-            {
-                std::cerr << "error: " << flag_name << " needs a non-empty value\n";
-                return false;
-            }
-            return true;
-        };
-
-        // Rejects "--no-png=false" and friends, which would otherwise be read as the flag with the value silently discarded.
-        auto reject_value = [&]() -> bool
-        {
-            if (!has_inline)
-                return true;
-            std::cerr << "error: " << arg << " does not take a value\n";
-            return false;
-        };
-
-        if (arg == "-h" || arg == "--help")
-        {
-            if (!reject_value())
-                return CLI_EXIT_USAGE;
-            print_help();
-            return CLI_PARSE_HELP;
-        }
-        else if (arg == "-p" || arg == "--pack")
-        {
-            if (!take_value("--pack", out_options.pack))
-                return CLI_EXIT_USAGE;
-        }
-        else if (arg == "-o" || arg == "--out")
-        {
-            if (!take_value("--out", out_options.out))
-                return CLI_EXIT_USAGE;
-        }
-        else if (arg == "-f" || arg == "--folder")
-        {
-            std::string raw;
-            if (!take_value("--folder", raw))
-                return CLI_EXIT_USAGE;
-
-            // A folder that normalizes away means the root was requested. Root extraction behaves inconsistently across pack types, so reject it outright.
-            const std::string normalized = normalize_archive_path(raw);
-            if (normalized.empty())
-            {
-                std::cerr << "error: whole-archive extraction is not supported; name a folder (got \"" << raw << "\")\n";
-                return CLI_EXIT_USAGE;
-            }
-            if (seen_folders.insert(normalized).second)
-                out_options.folders.push_back(normalized);
-        }
-        else if (arg == "--no-png")
-        {
-            if (!reject_value())
-                return CLI_EXIT_USAGE;
-            out_options.convert_sct_to_png = false;
-        }
-        else if (arg == "--no-json")
-        {
-            if (!reject_value())
-                return CLI_EXIT_USAGE;
-            out_options.convert_db_to_json = false;
-        }
-        else if (arg == "-v" || arg == "--verbose")
-        {
-            if (!reject_value())
-                return CLI_EXIT_USAGE;
-            out_options.verbose = true;
-        }
-        else if (arg == "-q" || arg == "--quiet")
-        {
-            if (!reject_value())
-                return CLI_EXIT_USAGE;
-            g_quiet = true;
-        }
-        else
-        {
-            std::cerr << "error: unrecognized argument \"" << args[i] << "\"\n";
-            return CLI_EXIT_USAGE;
-        }
-    }
-
-    if (out_options.pack.empty())
-    {
-        std::cerr << "error: --pack is required\n";
-        return CLI_EXIT_USAGE;
-    }
-    if (out_options.out.empty())
-    {
-        std::cerr << "error: --out is required\n";
-        return CLI_EXIT_USAGE;
-    }
-    if (out_options.folders.empty())
-    {
-        std::cerr << "error: at least one --folder is required\n";
-        return CLI_EXIT_USAGE;
-    }
-
-    return CLI_EXIT_OK;
-}
-
-// //////////////////////////////////////////////////////////////////////////////////////////////////
-// //////////////////////////////////////////////////////////////////////////////////////////////////
-// Extraction
-
-/**
- * Extracts one file at a time so each name can be printed. `IArchive::Extract` accepts any node including a leaf file, so this needs no change to the archive
- * code. Only used for --verbose since the per-file calls add a couple of log lines each.
- * @param archive The scanned archive.
- * @param node The node to walk.
- * @param dest The user's --out directory.
- * @param options Conversion flags.
- * @param files_done Running count of files written, updated in place.
- * @param files_total Total files expected, used for the printed counter.
- */
-static void extract_verbose(IArchive& archive, const AssetExporter& exporter, const Core::FileNode& node, const std::filesystem::path& dest, const CliOptions& options, uint32_t& files_done, uint32_t files_total)
-{
-    const ExportOptions export_opts{options.convert_sct_to_png, options.convert_db_to_json};
-    const std::filesystem::path out_base = output_base_for(dest, node.full_path);
-    exporter.ExtractNode(
-        archive,
-        node,
-        out_base,
-        export_opts,
-        Core::ProgressReporter::Null(),
-        [&](const Core::FileNode& extracted) {
-            ++files_done;
-            const auto& info = std::get<Core::FileInfo>(extracted.data);
-            std::cout << "  [" << files_done << "/" << files_total << "] " << extracted.full_path << "  (" << Core::FormatSize(info.size) << ")\n";
-        });
-}
-
-// //////////////////////////////////////////////////////////////////////////////////////////////////
-// //////////////////////////////////////////////////////////////////////////////////////////////////
-// Entry point
-
-/**
- * Opens the pack, scans it, and extracts every requested folder.
- * @param argc Argument count.
- * @param argv Argument vector. On Windows the wide command line is read instead, so this is only a fallback.
- * @returns One of the CLI_EXIT_* codes.
- */
-int main(int argc, char** argv)
-{
-#ifdef _WIN32
-    SetConsoleOutputCP(CP_UTF8);
-    g_stdout_is_tty = _isatty(_fileno(stdout)) != 0;
-#else
-    g_stdout_is_tty = isatty(1) != 0;
-#endif
-    // A piped stdout is fully buffered, so a caller reading it would see nothing until exit. Flush after every write instead.
-    if (!g_stdout_is_tty)
-        std::cout << std::unitbuf;
-
-    CliOptions options;
-    const int parse_result = parse_args(collect_args_utf8(argc, argv), options);
-    if (parse_result == CLI_PARSE_HELP)
-        return CLI_EXIT_OK;
-    if (parse_result != CLI_EXIT_OK)
-    {
-        std::cerr << "\nRun czn-cli --help for usage.\n";
-        return parse_result;
-    }
-
-    const std::filesystem::path pack_path(Core::Utf8ToWString(options.pack));
-    const std::filesystem::path dest_path(Core::Utf8ToWString(options.out));
-
-    if (!std::filesystem::exists(pack_path))
-    {
-        std::cerr << "error: pack not found: " << options.pack << "\n";
-        return CLI_EXIT_PACK_FAILED;
-    }
-
-    try
-    {
-        std::filesystem::create_directories(dest_path);
-    }
-    catch (const std::exception& e)
-    {
-        std::cerr << "error: could not create output directory " << options.out << ": " << e.what() << "\n";
-        return CLI_EXIT_PACK_FAILED;
-    }
-
-    LogInfo("CLI run started for pack: " + options.pack);
-
-    std::unique_ptr<IArchive> archive;
-    if (!run_guarded([&] { archive = ArchiveFactory::Open(pack_path); }) || !archive)
-    {
-        std::cerr << "error: could not open pack: " << options.pack << "\n";
-        return CLI_EXIT_PACK_FAILED;
-    }
-
-    std::cout << "Pack:        " << options.pack << "\n";
-    std::cout << "Destination: " << Core::PathToUtf8(std::filesystem::absolute(dest_path)) << "\n";
-    std::cout << "Scanning pack (this can take a while for a full data.pack)...\n";
-
-    std::atomic<float> progress = 0.f;
-    if (!run_with_progress("Scanning", progress, [] { return std::string(); }, [&] { archive->Scan(Core::ProgressReporter::FromAtomic(progress)); }))
-    {
-        std::cerr << "error: scan failed\n";
-        return CLI_EXIT_PACK_FAILED;
-    }
-
-    std::cout << "Scanned " << archive->GetParsedFileCount() << " files (" << Core::FormatSize(archive->GetParsedTotalSize()) << ")\n\n";
-
-    // Resolve every requested folder up front so missing ones are reported before any writing starts.
-    const Core::FileNode& root = archive->GetFileTree();
-    std::vector<ResolvedFolder> resolved;
-    std::vector<std::string> missing;
-    uint64_t bytes_total = 0;
-
-    for (const std::string& folder : options.folders)
-    {
-        const Core::FileNode* node = Core::FindNodeByPath(root, folder);
-        if (node == nullptr)
-        {
-            std::cerr << "error: not found in archive: " << folder << "\n";
-            LogError("CLI folder not found in archive: " + folder);
-            missing.push_back(folder);
-            continue;
-        }
-
+    /** One requested archive node resolved before extraction starts. */
+    struct ResolvedTarget {
+        const Core::FileNode* node = nullptr;
         uint64_t bytes = 0;
         uint32_t files = 0;
-        Core::NodeStats(*node, bytes, files);
-        bytes_total += bytes;
-        resolved.push_back({node, bytes, files});
-    }
+    };
 
-    if (resolved.empty())
-    {
-        std::cerr << "\nNothing to extract.\n";
-        return CLI_EXIT_ALL_FAILED;
-    }
-
-    std::vector<std::string> failed;
-    uint64_t bytes_done = 0;
-
-    for (size_t i = 0; i < resolved.size(); ++i)
-    {
-        const ResolvedFolder& folder = resolved[i];
-        const std::string& folder_path = folder.node->full_path;
-
-        std::cout << "[" << (i + 1) << "/" << resolved.size() << "] " << folder_path << "  (" << folder.files << " files, " << Core::FormatSize(folder.bytes) << ")\n";
-
-        // Extract returns straight away when the subtree holds no bytes, so say so here rather than flashing a bar to 100%.
-        if (folder.bytes == 0)
-        {
-            std::cout << "  warning: no data to extract\n";
-            LogInfo("CLI folder holds no data: " + folder_path);
-            continue;
+    /**
+     * Parses CLI arguments (supporting UTF-8 on Windows via CommandLineToArgvW)
+     * and validates required flags.
+     */
+    class CliArgParser {
+    public:
+        static std::vector<std::string> CollectArgsUtf8(int argc, char** argv) {
+            std::vector<std::string> args;
+#ifdef _WIN32
+            int wargc = 0;
+            if (LPWSTR* wargv = CommandLineToArgvW(GetCommandLineW(), &wargc); wargv != nullptr) {
+                args.reserve(static_cast<size_t>((std::max)(0, wargc - 1)));
+                for (int i = 1; i < wargc; ++i) {
+                    args.push_back(Core::WStringToUtf8(wargv[i]));
+                }
+                LocalFree(wargv);
+                return args;
+            }
+#endif
+            args.reserve(static_cast<size_t>((std::max)(0, argc - 1)));
+            for (int i = 1; i < argc; ++i) {
+                args.emplace_back(argv[i]);
+            }
+            return args;
         }
 
-        bool ok = true;
-        AssetExporter exporter;
-        if (options.verbose)
-        {
-            uint32_t files_done = 0;
-            ok = run_guarded([&] { extract_verbose(*archive, exporter, *folder.node, dest_path, options, files_done, folder.files); });
+        static void PrintHelp() {
+            std::cout <<
+                "ChaosZeroNightmareRipper-CLI - headless extractor for Chaos Zero Nightmare archives\n"
+                "\n"
+                "Usage:\n"
+                "  czn-cli --pack <path> --out <dir> --folder <archive/path> [--folder ...] [options]\n"
+                "\n"
+                "Required:\n"
+                "  -p, --pack <path>      data.pack, manifest.ssra, or an unpacked directory\n"
+                "  -o, --out <dir>        destination directory (created if missing)\n"
+                "  -f, --folder <path>    archive-relative folder or file to extract; repeatable\n"
+                "\n"
+                "Options:\n"
+                "      --no-png           keep .sct / .sct2 as-is instead of converting to .png\n"
+                "      --no-json          keep .db as-is instead of converting to .json\n"
+                "  -v, --verbose          print each extracted file\n"
+                "  -q, --quiet            suppress the progress bar; print only the summary\n"
+                "  -h, --help             show this help and exit\n"
+                "\n"
+                "Notes:\n"
+                "  Output preserves the full archive path. --out D:\\out --folder gameres/spine\n"
+                "  writes D:\\out\\gameres\\spine\\...\n"
+                "  .scsp files are always converted to .json.\n"
+                "  Settings in czn_ripper.ini are ignored. Use the flags above.\n"
+                "  Prefer a short destination path. Deep archive paths can exceed the Windows\n"
+                "  MAX_PATH limit when the destination is already long.\n"
+                "\n"
+                "Exit codes report whether each requested folder was FOUND and extracted. Errors\n"
+                "on individual files are logged and skipped without changing the exit code, so\n"
+                "check czn_ripper.log in the working directory to confirm a clean run.\n"
+                "  0  every requested folder was found and extracted\n"
+                "  1  usage error\n"
+                "  2  pack could not be opened or scanned\n"
+                "  3  some requested folders were missing or failed\n"
+                "  4  none of the requested folders could be extracted\n"
+                "\n"
+                "Example:\n"
+                "  ChaosZeroNightmareRipper-CLI --pack \"C:\\Games\\ChaosZeroNightmare\\bin\\appdata\\cznlive\\data.pack\"\n"
+                "          --out D:\\czn_assets\n"
+                "          --folder card --folder story --folder cutin --folder collapse\n";
         }
-        else
+
+        static ParseStatus Parse(std::span<const std::string> args, CliOptions& out_options) {
+            std::unordered_set<std::string> seen_folders;
+
+            for (size_t i = 0; i < args.size(); ++i) {
+                std::string_view arg = args[i];
+                std::string_view inline_value;
+                bool has_inline = false;
+
+                if (arg.starts_with("--")) {
+                    if (const size_t equals = arg.find('='); equals != std::string_view::npos) {
+                        inline_value = arg.substr(equals + 1);
+                        arg = arg.substr(0, equals);
+                        has_inline = true;
+                    }
+                }
+
+                auto take_value = [&](std::string_view flag_name, std::string& dest) -> bool {
+                    if (has_inline) {
+                        dest = std::string(inline_value);
+                    } else if (i + 1 < args.size()) {
+                        dest = args[++i];
+                    } else {
+                        std::cerr << std::format("error: {} needs a value\n", flag_name);
+                        return false;
+                    }
+
+                    if (dest.empty()) {
+                        std::cerr << std::format("error: {} needs a non-empty value\n", flag_name);
+                        return false;
+                    }
+                    return true;
+                };
+
+                auto reject_value = [&]() -> bool {
+                    if (!has_inline) return true;
+                    std::cerr << std::format("error: {} does not take a value\n", arg);
+                    return false;
+                };
+
+                if (arg == "-h" || arg == "--help") {
+                    if (!reject_value()) return ParseStatus::Error;
+                    PrintHelp();
+                    return ParseStatus::HelpPrinted;
+                }
+                if (arg == "-p" || arg == "--pack") {
+                    if (!take_value("--pack", out_options.pack)) return ParseStatus::Error;
+                } else if (arg == "-o" || arg == "--out") {
+                    if (!take_value("--out", out_options.out)) return ParseStatus::Error;
+                } else if (arg == "-f" || arg == "--folder") {
+                    std::string raw;
+                    if (!take_value("--folder", raw)) return ParseStatus::Error;
+
+                    const std::string normalized = Core::NormalizeArchivePath(raw);
+                    if (normalized.empty()) {
+                        std::cerr << std::format(
+                            "error: whole-archive extraction is not supported; name a folder (got \"{}\")\n",
+                            raw);
+                        return ParseStatus::Error;
+                    }
+                    if (seen_folders.insert(normalized).second) {
+                        out_options.folders.push_back(normalized);
+                    }
+                } else if (arg == "--no-png") {
+                    if (!reject_value()) return ParseStatus::Error;
+                    out_options.convert_sct_to_png = false;
+                } else if (arg == "--no-json") {
+                    if (!reject_value()) return ParseStatus::Error;
+                    out_options.convert_db_to_json = false;
+                } else if (arg == "-v" || arg == "--verbose") {
+                    if (!reject_value()) return ParseStatus::Error;
+                    out_options.verbose = true;
+                } else if (arg == "-q" || arg == "--quiet") {
+                    if (!reject_value()) return ParseStatus::Error;
+                    out_options.quiet = true;
+                } else {
+                    std::cerr << std::format("error: unrecognized argument \"{}\"\n", args[i]);
+                    return ParseStatus::Error;
+                }
+            }
+
+            if (out_options.pack.empty()) {
+                std::cerr << "error: --pack is required\n";
+                return ParseStatus::Error;
+            }
+            if (out_options.out.empty()) {
+                std::cerr << "error: --out is required\n";
+                return ParseStatus::Error;
+            }
+            if (out_options.folders.empty()) {
+                std::cerr << "error: at least one --folder is required\n";
+                return ParseStatus::Error;
+            }
+            return ParseStatus::Ok;
+        }
+    };
+
+    /**
+     * Renders throttled in-place progress bars on TTY consoles or sparse 5%-step
+     * lines when stdout is redirected, driven directly by Core::ProgressReporter.
+     */
+    class ConsoleProgressBar {
+    public:
+        static constexpr int kBarWidth = 30;
+        static constexpr int kPipeStepPercent = 5;
+        static constexpr auto kTtyThrottleInterval = std::chrono::milliseconds(50);
+
+        ConsoleProgressBar(bool is_tty, bool quiet) noexcept
+            : m_is_tty(is_tty), m_quiet(quiet) {}
+
+        Core::ProgressReporter MakeReporter(
+            std::string label,
+            std::function<std::string(float)> suffix_fn = {})
         {
-            // The bar tracks the current folder while the suffix shows progress across all of them.
-            const std::filesystem::path out_base = output_base_for(dest_path, folder_path);
+            Reset();
+            return Core::ProgressReporter::FromCallback(
+                [this, label = std::move(label), suffix_fn = std::move(suffix_fn)](float fraction) {
+                    const std::string suffix = suffix_fn ? suffix_fn(fraction) : std::string{};
+                    Draw(label, fraction, suffix, false);
+                });
+        }
+
+        void Finish(std::string_view label, std::string_view suffix = {}) {
+            if (m_quiet) return;
+            Draw(label, 1.0f, suffix, true);
+            if (m_is_tty) {
+                std::cout << '\n';
+            }
+        }
+
+    private:
+        void Reset() noexcept {
+            m_last_percent = -1;
+            m_last_draw = Clock::time_point{};
+        }
+
+        void Draw(std::string_view label, float fraction, std::string_view suffix, bool force) {
+            if (m_quiet) return;
+
+            fraction = std::clamp(fraction, 0.0f, 1.0f);
+            const int percent = static_cast<int>(fraction * 100.0f + 0.5f);
+
+            if (!m_is_tty) {
+                if (percent == m_last_percent) return;
+                if (!force && (percent % kPipeStepPercent) != 0) return;
+                m_last_percent = percent;
+
+                if (suffix.empty()) {
+                    std::cout << std::format("{} {}%\n", label, percent);
+                } else {
+                    std::cout << std::format("{} {}% {}\n", label, percent, suffix);
+                }
+                return;
+            }
+
+            const auto now = Clock::now();
+            if (!force && m_last_percent >= 0 && percent == m_last_percent &&
+                (now - m_last_draw) < kTtyThrottleInterval) {
+                return;
+            }
+            m_last_percent = percent;
+            m_last_draw = now;
+
+            const int filled = static_cast<int>(fraction * kBarWidth + 0.5f);
+            std::string bar(static_cast<size_t>(filled), '#');
+            bar.append(static_cast<size_t>(kBarWidth - filled), '-');
+
+            std::cout << std::format("\r{} [{}] {:3d}%  {}        ", label, bar, percent, suffix)
+                      << std::flush;
+        }
+
+        using Clock = std::chrono::steady_clock;
+
+        bool m_is_tty = false;
+        bool m_quiet = false;
+        int m_last_percent = -1;
+        Clock::time_point m_last_draw{};
+    };
+
+    /**
+     * Headless CLI application orchestrating archive opening, scanning, target
+     * resolution, and asset extraction via ArchiveFactory and AssetExporter.
+     */
+    class CliApp {
+    public:
+        int Run(int argc, char** argv) {
+            const bool is_tty = ConfigureConsole();
+
+            CliOptions options;
+            const auto args = CliArgParser::CollectArgsUtf8(argc, argv);
+            const ParseStatus status = CliArgParser::Parse(args, options);
+            if (status == ParseStatus::HelpPrinted) {
+                return static_cast<int>(ExitCode::Ok);
+            }
+            if (status != ParseStatus::Ok) {
+                std::cerr << "\nRun czn-cli --help for usage.\n";
+                return static_cast<int>(ExitCode::Usage);
+            }
+
+            const std::filesystem::path pack_path(Core::Utf8ToWString(options.pack));
+            const std::filesystem::path dest_path(Core::Utf8ToWString(options.out));
+
+            if (!std::filesystem::exists(pack_path)) {
+                std::cerr << std::format("error: pack not found: {}\n", options.pack);
+                return static_cast<int>(ExitCode::PackFailed);
+            }
+
+            try {
+                std::filesystem::create_directories(dest_path);
+            } catch (const std::exception& e) {
+                std::cerr << std::format("error: could not create output directory {}: {}\n", options.out, e.what());
+                return static_cast<int>(ExitCode::PackFailed);
+            }
+
+            LogInfo("CLI run started for pack: " + options.pack);
+
+            std::unique_ptr<IArchive> archive;
+            if (!RunGuarded([&] { archive = ArchiveFactory::Open(pack_path); }) || !archive) {
+                std::cerr << std::format("error: could not open pack: {}\n", options.pack);
+                return static_cast<int>(ExitCode::PackFailed);
+            }
+
+            std::cout << std::format("Pack:        {}\n", options.pack);
+            std::cout << std::format("Destination: {}\n", Core::PathToUtf8(std::filesystem::absolute(dest_path)));
+            std::cout << "Scanning archive...\n";
+
+            ConsoleProgressBar progress_bar(is_tty, options.quiet);
+            auto scan_reporter = progress_bar.MakeReporter("Scanning");
+            if (!RunGuarded([&] { archive->Scan(scan_reporter); })) {
+                std::cerr << "error: scan failed\n";
+                return static_cast<int>(ExitCode::PackFailed);
+            }
+            progress_bar.Finish("Scanning");
+
+            std::cout << std::format(
+                "Scanned {} files ({})\n\n",
+                archive->GetParsedFileCount(),
+                Core::FormatSize(archive->GetParsedTotalSize()));
+
+            // Resolve every requested folder upfront so missing paths are reported immediately.
+            const Core::FileNode& root = archive->GetFileTree();
+            std::vector<ResolvedTarget> resolved;
+            std::vector<std::string> missing;
+            uint64_t bytes_total = 0;
+
+            resolved.reserve(options.folders.size());
+            for (const std::string& folder : options.folders) {
+                const Core::FileNode* node = Core::FindNodeByPath(root, folder);
+                if (!node) {
+                    std::cerr << std::format("error: not found in archive: {}\n", folder);
+                    LogError("CLI folder not found in archive: " + folder);
+                    missing.push_back(folder);
+                    continue;
+                }
+
+                uint64_t bytes = 0;
+                uint32_t files = 0;
+                Core::NodeStats(*node, bytes, files);
+                bytes_total += bytes;
+                resolved.push_back({node, bytes, files});
+            }
+
+            if (resolved.empty()) {
+                std::cerr << "\nNothing to extract.\n";
+                return static_cast<int>(ExitCode::AllFailed);
+            }
+
             const ExportOptions export_opts{options.convert_sct_to_png, options.convert_db_to_json};
-            auto suffix_fn = [&]
-            {
-                const float local = std::min(1.0f, std::max(0.0f, progress.load()));
-                const uint64_t overall_done = bytes_done + static_cast<uint64_t>(local * static_cast<float>(folder.bytes));
-                const int total_percent = (bytes_total > 0)
-                    ? static_cast<int>(100.0 * static_cast<double>(overall_done) / static_cast<double>(bytes_total))
-                    : 100;
-                return "total " + std::to_string(total_percent) + "%";
-            };
-            auto work = [&] { exporter.ExtractNode(*archive, *folder.node, out_base, export_opts, Core::ProgressReporter::FromAtomic(progress)); };
-            ok = run_with_progress("  Extracting", progress, suffix_fn, work);
+            const AssetExporter exporter;
+            std::vector<std::string> failed;
+            uint64_t bytes_done = 0;
+
+            for (size_t i = 0; i < resolved.size(); ++i) {
+                const ResolvedTarget& target = resolved[i];
+                const std::string& folder_path = target.node->full_path;
+
+                std::cout << std::format(
+                    "[{}/{}] {}  ({} files, {})\n",
+                    i + 1,
+                    resolved.size(),
+                    folder_path,
+                    target.files,
+                    Core::FormatSize(target.bytes));
+
+                if (target.bytes == 0) {
+                    std::cout << "  warning: no data to extract\n";
+                    LogInfo("CLI folder holds no data: " + folder_path);
+                    continue;
+                }
+
+                const std::filesystem::path out_base = OutputBaseFor(dest_path, folder_path);
+                bool ok = true;
+
+                if (options.verbose) {
+                    uint32_t files_done = 0;
+                    ok = RunGuarded([&] {
+                        exporter.ExtractNode(
+                            *archive,
+                            *target.node,
+                            out_base,
+                            export_opts,
+                            Core::ProgressReporter::Null(),
+                            [&](const Core::FileNode& extracted) {
+                                ++files_done;
+                                const auto& info = std::get<Core::FileInfo>(extracted.data);
+                                std::cout << std::format(
+                                    "  [{}/{}] {}  ({})\n",
+                                    files_done,
+                                    target.files,
+                                    extracted.full_path,
+                                    Core::FormatSize(info.size));
+                            });
+                    });
+                } else {
+                    auto make_suffix = [bytes_done, bytes_total, folder_bytes = target.bytes](float local) {
+                        const float clamped = std::clamp(local, 0.0f, 1.0f);
+                        const uint64_t overall_done =
+                            bytes_done + static_cast<uint64_t>(clamped * static_cast<double>(folder_bytes));
+                        const int total_percent = (bytes_total > 0)
+                            ? static_cast<int>(100.0 * static_cast<double>(overall_done) / static_cast<double>(bytes_total))
+                            : 100;
+                        return std::format("total {}%", total_percent);
+                    };
+
+                    auto extract_reporter = progress_bar.MakeReporter("  Extracting", make_suffix);
+                    ok = RunGuarded([&] {
+                        exporter.ExtractNode(*archive, *target.node, out_base, export_opts, extract_reporter);
+                    });
+                    progress_bar.Finish("  Extracting", make_suffix(1.0f));
+                }
+
+                bytes_done += target.bytes;
+                if (!ok) {
+                    failed.push_back(folder_path);
+                }
+            }
+
+            const size_t failure_count = missing.size() + failed.size();
+            const size_t success_count = options.folders.size() - failure_count;
+
+            std::cout << std::format("\nDone. {} of {} folders extracted.\n", success_count, options.folders.size());
+            if (!missing.empty()) {
+                std::cout << "Not found in archive:\n";
+                for (const std::string& folder : missing) {
+                    std::cout << std::format("  {}\n", folder);
+                }
+            }
+            if (!failed.empty()) {
+                std::cout << "Failed during extraction:\n";
+                for (const std::string& folder : failed) {
+                    std::cout << std::format("  {}\n", folder);
+                }
+            }
+
+            LogInfo(std::format("CLI run finished: {}/{} folders extracted", success_count, options.folders.size()));
+            std::cout << std::format(
+                "Per-file log: {}\n",
+                Core::PathToUtf8(std::filesystem::absolute("czn_ripper.log")));
+
+            if (failure_count == 0) return static_cast<int>(ExitCode::Ok);
+            if (success_count == 0) return static_cast<int>(ExitCode::AllFailed);
+            return static_cast<int>(ExitCode::PartialFailure);
         }
 
-        bytes_done += folder.bytes;
-        if (!ok)
-            failed.push_back(folder_path);
-    }
+    private:
+        static bool ConfigureConsole() {
+#ifdef _WIN32
+            SetConsoleOutputCP(CP_UTF8);
+            const bool is_tty = _isatty(_fileno(stdout)) != 0;
+#else
+            const bool is_tty = isatty(1) != 0;
+#endif
+            // Piped stdout is fully buffered; flush after every write so callers see live progress.
+            if (!is_tty) {
+                std::cout << std::unitbuf;
+            }
+            return is_tty;
+        }
 
-    const size_t failure_count = missing.size() + failed.size();
-    const size_t success_count = options.folders.size() - failure_count;
+        static std::filesystem::path OutputBaseFor(
+            const std::filesystem::path& dest,
+            std::string_view node_full_path)
+        {
+            const size_t slash = node_full_path.find_last_of('/');
+            if (slash == std::string_view::npos) {
+                return dest;
+            }
+            return dest / std::filesystem::path(Core::Utf8ToWString(node_full_path.substr(0, slash)));
+        }
 
-    std::cout << "\nDone. " << success_count << " of " << options.folders.size() << " folders extracted.\n";
-    if (!missing.empty())
-    {
-        std::cout << "Not found in archive:\n";
-        for (const std::string& folder : missing)
-            std::cout << "  " << folder << "\n";
-    }
-    if (!failed.empty())
-    {
-        std::cout << "Failed during extraction:\n";
-        for (const std::string& folder : failed)
-            std::cout << "  " << folder << "\n";
-    }
+        template <typename Fn>
+        static bool RunGuarded(Fn&& work) {
+            try {
+                work();
+                return true;
+            } catch (const std::exception& e) {
+                std::cerr << std::format("  error: {}\n", e.what());
+                LogError(std::string("CLI operation failed: ") + e.what());
+                return false;
+            } catch (...) {
+                std::cerr << "  error: unknown exception\n";
+                LogError("CLI operation failed with an unknown exception");
+                return false;
+            }
+        }
+    };
 
-    LogInfo("CLI run finished: " + std::to_string(success_count) + "/" + std::to_string(options.folders.size()) + " folders extracted");
-    std::cout << "Per-file log: " << Core::PathToUtf8(std::filesystem::absolute("czn_ripper.log")) << "\n";
+} // namespace
 
-    if (failure_count == 0)
-        return CLI_EXIT_OK;
-    if (success_count == 0)
-        return CLI_EXIT_ALL_FAILED;
-    return CLI_EXIT_PARTIAL_FAILURE;
+int main(int argc, char** argv) {
+    CliApp app;
+    return app.Run(argc, argv);
 }
