@@ -65,7 +65,17 @@ ChaosZeroNightmareRipper-CLI --pack "WhereYouInstalledTheGame\ChaosZeroNightmare
 | `-q`, `--quiet` | suppress the progress bar |
 | `-h`, `--help` | show help |
 
-The output preserves the full archive path, so `--out D:\out --folder collapse/collapse_illustration` writes to `D:\out\collapse\collapse_illustration\`. Texture and database conversion are on by default, matching the GUI. A folder that is not in the archive is reported but does not stop the others, and the exit code says what happened: `0` every folder found and extracted, `1` usage error, `2` the pack could not be opened or scanned, `3` some folders were missing or failed, `4` none could be extracted. Errors on individual files are logged and skipped without changing the exit code, so check `czn_ripper.log` to confirm a clean run.
+The output preserves the full archive path, so `--out D:\out --folder collapse/collapse_illustration` writes to `D:\out\collapse\collapse_illustration\`. 
+
+
+A folder that is not in the archive is reported but does not stop the others, and the exit code says what happened: 
+- `0` every folder found and extracted, 
+- `1` usage error 
+- `2` the pack could not be opened or scanned, 
+- `3` some folders were missing or failed, 
+- `4` none could be extracted. 
+
+Errors on individual files are logged and skipped without changing the exit code, so check `czn_ripper.log`.
 
 ## Build Instructions
 
