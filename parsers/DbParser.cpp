@@ -21,7 +21,7 @@ namespace {
         uint64_t hash_table_offset = 0;
     };
 
-    std::vector<uint8_t> DecryptDb(std::span<const uint8_t> data) {
+    std::vector<uint8_t> DecryptDb(const std::span<const uint8_t> data) {
         if (data.size() < kDbMagic.size()) return {};
 
         const auto& key = Core::kDatabaseXorKey;
@@ -44,27 +44,27 @@ namespace {
         return {};
     }
 
-    bool ParseHeader(Core::BinaryReader& reader, DbHeader& out) noexcept {
+    bool ParseHeader(Core::BinaryReader& reader, DbHeader& header) noexcept {
         if (!reader.HasBytes(kExpectedHeaderSize) || !reader.MatchMagic(kDbMagic)) {
             return false;
         }
-        out.version = *reader.TryRead<uint8_t>();
-        out.header_size = *reader.TryRead<uint16_t>();
-        if (out.header_size != kExpectedHeaderSize) {
+        header.version = *reader.TryRead<uint8_t>();
+        header.header_size = *reader.TryRead<uint16_t>();
+        if (header.header_size != kExpectedHeaderSize) {
             return false;
         }
         reader.Skip(1 + 8); // unk + unk1
-        out.default_file_count = *reader.TryRead<uint32_t>();
-        out.hash_table_count = *reader.TryRead<uint32_t>();
+        header.default_file_count = *reader.TryRead<uint32_t>();
+        header.hash_table_count = *reader.TryRead<uint32_t>();
         const auto ht_offset = reader.TryReadUInt40HiLo();
         if (!ht_offset) return false;
-        out.hash_table_offset = *ht_offset;
+        header.hash_table_offset = *ht_offset;
         reader.Skip(8); // unk5
         return true;
     }
 
-    std::string_view SpanAsStringView(std::span<const uint8_t> s) noexcept {
-        return {reinterpret_cast<const char*>(s.data()), s.size()};
+    std::string_view SpanAsString(const std::span<const uint8_t> span) noexcept {
+        return {reinterpret_cast<const char*>(span.data()), span.size()};
     }
 
 } // namespace
@@ -82,31 +82,29 @@ nlohmann::ordered_json DbParser::ParseToJson(std::span<const uint8_t> data) {
             return nlohmann::ordered_json::object();
         }
 
-        if (!reader.Seek(static_cast<size_t>(header.hash_table_offset)) || !reader.HasBytes(5)) {
+        if (!reader.Seek(header.hash_table_offset) || !reader.HasBytes(5)) {
             return nlohmann::ordered_json::object();
         }
 
         const uint32_t root_size = *reader.TryRead<uint32_t>();
-        const uint8_t root_tag = *reader.TryRead<uint8_t>();
-        if (root_tag != 1 || root_size != 5u * (header.hash_table_count + 1u)) {
+        if (const uint8_t root_tag = *reader.TryRead<uint8_t>(); root_tag != 1 || root_size != 5u * (header.hash_table_count + 1u)) {
             return nlohmann::ordered_json::object();
         }
 
-        // Zero-copy map from entry name -> byte slice inside decrypted buffer
         std::unordered_map<std::string_view, std::span<const uint8_t>> entries;
         entries.reserve(header.default_file_count + 16);
 
         for (uint32_t i = 0; i < header.hash_table_count; ++i) {
-            const auto entry_offset_opt = reader.TryReadUInt40HiLo();
-            if (!entry_offset_opt) break;
-            if (*entry_offset_opt == 0) continue;
+            const auto entry_offset = reader.TryReadUInt40HiLo();
+            if (!entry_offset) break;
+            if (*entry_offset == 0) continue;
 
-            uint64_t current_pos = *entry_offset_opt;
+            uint64_t current_pos = *entry_offset;
             size_t chain_guard = 0;
             constexpr size_t kMaxChainSteps = 100000;
 
             while (current_pos != 0 && current_pos < decrypted.size() && ++chain_guard <= kMaxChainSteps) {
-                Core::BinaryReader chunk_reader(decrypted, static_cast<size_t>(current_pos));
+                Core::BinaryReader chunk_reader(decrypted, current_pos);
                 if (!chunk_reader.HasBytes(15)) break;
 
                 chunk_reader.Skip(4); // entry_size
@@ -120,7 +118,7 @@ nlohmann::ordered_json DbParser::ParseToJson(std::span<const uint8_t> data) {
                 const auto file_bytes = chunk_reader.TryReadBytes(file_size);
                 if (!name_bytes || !file_bytes) break;
 
-                entries.emplace(SpanAsStringView(*name_bytes), *file_bytes);
+                entries.emplace(SpanAsString(*name_bytes), *file_bytes);
                 current_pos = *next_entry;
             }
         }
@@ -141,41 +139,41 @@ nlohmann::ordered_json DbParser::ParseToJson(std::span<const uint8_t> data) {
         for (uint32_t col = 0; col < cols; ++col) {
             const std::string key = "\t" + std::to_string(col);
             if (const auto it = entries.find(key); it != entries.end()) {
-                col_names.emplace_back(SpanAsStringView(it->second));
+                col_names.emplace_back(SpanAsString(it->second));
             }
         }
 
-        nlohmann::ordered_json root_json = nlohmann::ordered_json::array();
-        std::vector<std::string_view> values;
-        values.reserve(col_names.size());
+        nlohmann::ordered_json db_json = nlohmann::ordered_json::array();
+        std::vector<std::string_view> column_names;
+        column_names.reserve(col_names.size());
 
         for (uint32_t row = 0; row < rows; ++row) {
             const std::string entry_key = "\t\t" + std::to_string(row);
-            const auto entry_it = entries.find(entry_key);
-            if (entry_it == entries.end()) continue;
+            const auto row_entry_pointer = entries.find(entry_key);
+            if (row_entry_pointer == entries.end()) continue;
 
-            const auto actual_it = entries.find(SpanAsStringView(entry_it->second));
-            if (actual_it == entries.end()) continue;
+            const auto row_entry = entries.find(SpanAsString(row_entry_pointer->second));
+            if (row_entry == entries.end()) continue;
 
-            values.clear();
-            const auto row_bytes = actual_it->second;
-            size_t start = 0;
+            column_names.clear();
+            const auto row_bytes = row_entry->second;
+            size_t row_starting_offset = 0;
             for (size_t i = 0; i < row_bytes.size(); ++i) {
                 if (row_bytes[i] == 0) {
-                    values.push_back(SpanAsStringView(row_bytes.subspan(start, i - start)));
-                    start = i + 1;
+                    column_names.push_back(SpanAsString(row_bytes.subspan(row_starting_offset, i - row_starting_offset)));
+                    row_starting_offset = i + 1;
                 }
             }
 
             nlohmann::ordered_json row_obj = nlohmann::ordered_json::object();
-            const size_t count = (std::min)(col_names.size(), values.size());
+            const size_t count = (std::min)(col_names.size(), column_names.size());
             for (size_t i = 0; i < count; ++i) {
-                row_obj[col_names[i]] = values[i];
+                row_obj[col_names[i]] = column_names[i];
             }
-            root_json.push_back(std::move(row_obj));
+            db_json.push_back(std::move(row_obj));
         }
 
-        return root_json;
+        return db_json;
     } catch (const std::exception& e) {
         LogError(std::string("DbParser::ParseToJson exception: ") + e.what());
         return nlohmann::ordered_json::object();
