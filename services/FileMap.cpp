@@ -12,29 +12,28 @@ namespace Services {
     namespace {
 
         nlohmann::ordered_json SerializeNode(const Core::FileNode& node) {
-            nlohmann::ordered_json j;
-            j["name"] = node.name;
-            j["path"] = node.full_path;
+            nlohmann::ordered_json serialized_node;
+            serialized_node["name"] = node.name;
+            serialized_node["path"] = node.full_path;
 
             if (const auto* info = std::get_if<Core::FileInfo>(&node.data)) {
-                j["type"] = "file";
-                j["size"] = info->size;
-                j["offset"] = info->offset;
-                j["format"] = info->format;
+                serialized_node["type"] = "file";
+                serialized_node["size"] = info->size;
+                serialized_node["offset"] = info->offset;
+                serialized_node["format"] = info->format;
             } else if (const auto* folder = std::get_if<Core::FolderInfo>(&node.data)) {
-                j["type"] = "folder";
-                j["children"] = nlohmann::ordered_json::array();
+                serialized_node["type"] = "folder";
+                serialized_node["children"] = nlohmann::ordered_json::array();
                 for (const auto& child : folder->children) {
-                    j["children"].push_back(SerializeNode(child));
+                    serialized_node["children"].push_back(SerializeNode(child));
                 }
             }
-            return j;
+            return serialized_node;
         }
 
         void CollectOldFiles(const nlohmann::ordered_json& node, std::unordered_map<std::string, uint64_t>& out_map) {
             if (!node.is_object() || !node.contains("type")) return;
-            const auto& type = node["type"];
-            if (type == "file") {
+            if (const auto& type = node["type"]; type == "file") {
                 if (node.contains("path") && node.contains("size")) {
                     out_map[Core::NormalizeArchivePath(node["path"].get<std::string>())] = node["size"].get<uint64_t>();
                 }
@@ -55,9 +54,6 @@ namespace Services {
             }
         }
 
-        /**
-         * Hash-indexed O(N) builder for DiffNode trees with precomputed folder stats.
-         */
         class DiffTreeBuilder {
         public:
             DiffTreeBuilder() {
@@ -67,9 +63,9 @@ namespace Services {
                 m_nodes.push_back(std::move(root));
             }
 
-            void Insert(std::string_view raw_path, uint64_t size, DiffStatus status) {
-                const std::string clean = Core::NormalizeArchivePath(raw_path);
-                const auto parts = Core::SplitPath(clean);
+            void Insert(const std::string_view raw_path, const uint64_t size, const DiffStatus status) {
+                const std::string cleaned_path = Core::NormalizeArchivePath(raw_path);
+                const auto parts = Core::SplitPath(cleaned_path);
                 if (parts.empty()) return;
 
                 size_t current_idx = 0;
@@ -83,12 +79,12 @@ namespace Services {
                     auto& index_map = m_nodes[current_idx].child_index;
                     if (const auto it = index_map.find(parts[i]); it != index_map.end()) {
                         current_idx = it->second;
-                        BuildNode& existing = m_nodes[current_idx];
+                        BuildNode& existing_node = m_nodes[current_idx];
                         if (is_last) {
-                            if (status != DiffStatus::Unchanged) existing.status = status;
+                            if (status != DiffStatus::Unchanged) existing_node.status = status;
                         } else {
-                            if (status != DiffStatus::Unchanged && existing.status == DiffStatus::Unchanged) {
-                                existing.status = DiffStatus::Modified;
+                            if (status != DiffStatus::Unchanged && existing_node.status == DiffStatus::Unchanged) {
+                                existing_node.status = DiffStatus::Modified;
                             }
                         }
                     } else {
@@ -129,35 +125,35 @@ namespace Services {
                 std::unordered_map<std::string, size_t> child_index;
             };
 
-            [[nodiscard]] std::unique_ptr<DiffNode> Materialize(size_t idx) const {
-                const BuildNode& src = m_nodes[idx];
-                auto out = std::make_unique<DiffNode>();
-                out->name = src.name;
-                out->full_path = src.full_path;
-                out->is_folder = src.is_folder;
-                out->format = src.format;
-                out->status = src.status;
+            [[nodiscard]] std::unique_ptr<DiffNode> Materialize(const size_t idx) const {
+                const BuildNode& src_node = m_nodes[idx];
+                auto diff_node = std::make_unique<DiffNode>();
+                diff_node->name = src_node.name;
+                diff_node->full_path = src_node.full_path;
+                diff_node->is_folder = src_node.is_folder;
+                diff_node->format = src_node.format;
+                diff_node->status = src_node.status;
 
-                if (!src.is_folder) {
-                    out->size = src.size;
-                    out->file_count = 1;
-                    return out;
+                if (!src_node.is_folder) {
+                    diff_node->size = src_node.size;
+                    diff_node->file_count = 1;
+                    return diff_node;
                 }
 
-                out->children.reserve(src.children.size());
-                for (const size_t child_idx : src.children) {
+                diff_node->children.reserve(src_node.children.size());
+                for (const size_t child_idx : src_node.children) {
                     auto child = Materialize(child_idx);
-                    out->size += child->size;
-                    out->file_count += child->file_count;
-                    out->children.push_back(std::move(child));
+                    diff_node->size += child->size;
+                    diff_node->file_count += child->file_count;
+                    diff_node->children.push_back(std::move(child));
                 }
 
-                std::ranges::sort(out->children, [](const std::unique_ptr<DiffNode>& a, const std::unique_ptr<DiffNode>& b) {
+                std::ranges::sort(diff_node->children, [](const std::unique_ptr<DiffNode>& a, const std::unique_ptr<DiffNode>& b) {
                     if (a->is_folder != b->is_folder) return a->is_folder > b->is_folder;
                     return a->name < b->name;
                 });
 
-                return out;
+                return diff_node;
             }
 
             std::vector<BuildNode> m_nodes;
@@ -169,8 +165,8 @@ namespace Services {
         nlohmann::ordered_json tree = SerializeNode(root);
         nlohmann::ordered_json result;
         result["generator"] = AppInfo::FileMapGeneratorId;
-        for (auto& el : tree.items()) {
-            result[el.key()] = std::move(el.value());
+        for (auto& element : tree.items()) {
+            result[element.key()] = std::move(element.value());
         }
         return result;
     }
@@ -183,12 +179,12 @@ namespace Services {
         out << ToJson(root).dump(2);
     }
 
-    bool FileMapSerializer::IsValid(const nlohmann::ordered_json& json_doc) noexcept {
-        if (!json_doc.is_object()) return false;
-        if (!json_doc.contains("generator") || !json_doc["generator"].is_string()) return false;
-        if (json_doc["generator"].get<std::string>() != AppInfo::FileMapGeneratorId) return false;
-        if (!json_doc.contains("type") || json_doc["type"] != "folder") return false;
-        if (!json_doc.contains("children") || !json_doc["children"].is_array()) return false;
+    bool FileMapSerializer::IsValid(const nlohmann::ordered_json& filemap) noexcept {
+        if (!filemap.is_object()) return false;
+        if (!filemap.contains("generator") || !filemap["generator"].is_string()) return false;
+        if (filemap["generator"].get<std::string>() != AppInfo::FileMapGeneratorId) return false;
+        if (!filemap.contains("type") || filemap["type"] != "folder") return false;
+        if (!filemap.contains("children") || !filemap["children"].is_array()) return false;
         return true;
     }
 
@@ -197,16 +193,14 @@ namespace Services {
         if (!in.is_open()) {
             throw std::runtime_error("Error opening filemap.json: " + Core::PathToUtf8(path));
         }
-        nlohmann::ordered_json parsed = nlohmann::ordered_json::parse(in);
-        if (!IsValid(parsed)) {
+        nlohmann::ordered_json filemap = nlohmann::ordered_json::parse(in);
+        if (!IsValid(filemap)) {
             throw std::runtime_error("Selected file is not a valid filemap generated by this tool.");
         }
-        return parsed;
+        return filemap;
     }
 
-    std::unique_ptr<DiffNode> ArchiveDiff::Build(
-        const nlohmann::ordered_json& old_filemap,
-        const Core::FileNode& current_root)
+    std::unique_ptr<DiffNode> ArchiveDiff::Build(const nlohmann::ordered_json& old_filemap, const Core::FileNode& current_root)
     {
         std::unordered_map<std::string, uint64_t> old_map;
         CollectOldFiles(old_filemap, old_map);
