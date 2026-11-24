@@ -47,7 +47,7 @@ namespace Services {
         [[nodiscard]] const std::string& Status() const noexcept { return m_status; }
         void SetStatus(std::string status) { m_status = std::move(status); }
 
-        bool Start(TaskKind kind, std::string initial_status, std::function<void(Core::ProgressReporter)> work) {
+        bool Start(const TaskKind kind, std::string initial_status, std::function<void(Core::ProgressReporter)> work) {
             if (IsRunning()) return false;
 
             Wait();
