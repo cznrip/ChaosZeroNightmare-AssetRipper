@@ -59,14 +59,16 @@ target_link_libraries(czn_core PUBLIC astc-encoder::astcenc-static Threads::Thre
 add_executable(
     ${PROJECT_NAME} WIN32
     main.cpp
-        gui/App.cpp
-        gui/AppState.cpp
-        gui/UIHelpers.cpp
-        gui/Popups.cpp
-        gui/PreviewPanel.cpp
-        gui/FileBrowserPanel.cpp
-        gui/SpinePanel.cpp
-        gui/Toolbar.cpp
+    gui/App.cpp
+    gui/AppState.cpp
+    gui/UiStyle.cpp
+    gui/ImageWindow.cpp
+    gui/PreviewManager.cpp
+    gui/PopupManager.cpp
+    gui/PreviewPanel.cpp
+    gui/FileBrowserPanel.cpp
+    gui/SpinePanel.cpp
+    gui/Toolbar.cpp
     $<TARGET_OBJECTS:czn_core>
     parsers/SpineCatalog.cpp
     parsers/SpineRenderer.cpp
