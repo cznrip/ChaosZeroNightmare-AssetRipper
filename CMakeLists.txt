@@ -30,6 +30,8 @@ set(CZN_CORE_SOURCES
     archive/DataPackArchive.cpp
     archive/DirectoryArchive.cpp
     archive/SsraArchive.cpp
+    converters/AssetConverter.cpp
+    services/AssetExporter.cpp
     parsers/SctParser.cpp
     parsers/DbParser.cpp
     parsers/ScspParser.cpp
@@ -40,6 +42,8 @@ set(CZN_CORE_INCLUDE_DIRS
     "${CMAKE_CURRENT_SOURCE_DIR}"
     "${CMAKE_CURRENT_SOURCE_DIR}/core"
     "${CMAKE_CURRENT_SOURCE_DIR}/archive"
+    "${CMAKE_CURRENT_SOURCE_DIR}/converters"
+    "${CMAKE_CURRENT_SOURCE_DIR}/services"
     "${CMAKE_CURRENT_SOURCE_DIR}/parsers"
     "${CMAKE_CURRENT_SOURCE_DIR}/libs"
     "${CMAKE_CURRENT_SOURCE_DIR}/libs/zstd"

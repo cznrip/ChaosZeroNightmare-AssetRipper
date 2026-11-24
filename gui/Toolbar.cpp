@@ -9,6 +9,7 @@
 #include "core/FileDialogs.hpp"
 #include "archive/ArchiveFactory.hpp"
 #include "archive/IArchive.hpp"
+#include "services/AssetExporter.hpp"
 #include "gui/AppState.hpp"
 #include "gui/FileBrowserPanel.hpp"
 #include "gui/PreviewPanel.hpp"
@@ -200,12 +201,15 @@ void draw_toolbar(nk_context *ctx)
                 g_state.tasks.kind = TaskKind::Extract;
                 g_state.tasks.status = "Extracting all files...";
                 g_state.tasks.progress = 0.0f;
-                bool convert_sct = (g_state.common.export_sct_as_png != 0);
-                bool convert_db = (g_state.common.export_db_as_json != 0);
-                g_state.tasks.future = std::async(std::launch::async, [dest_path, convert_sct, convert_db]()
+                const ExportOptions export_opts{
+                    .convert_sct_to_png = (g_state.common.export_sct_as_png != 0),
+                    .convert_db_to_json = (g_state.common.export_db_as_json != 0)
+                };
+                g_state.tasks.future = std::async(std::launch::async, [dest_path, export_opts]()
                                          {
                     try {
-                        g_state.browser.data_pack->Extract(g_state.browser.data_pack->GetFileTree(), dest_path, g_state.tasks.progress, convert_sct, convert_db);
+                        AssetExporter exporter;
+                        exporter.ExtractAll(*g_state.browser.data_pack, dest_path, export_opts, Core::ProgressReporter::FromAtomic(g_state.tasks.progress));
                     }
                     catch (...) {} });
             }
@@ -269,18 +273,15 @@ void draw_toolbar(nk_context *ctx)
 
                 g_state.tasks.status = "Extracting " + std::to_string(nodes_to_extract.size()) + " item(s)...";
                 g_state.tasks.progress = 0.0f;
-                bool convert_sct = (g_state.common.export_sct_as_png != 0);
-                bool convert_db = (g_state.common.export_db_as_json != 0);
-                g_state.tasks.future = std::async(std::launch::async, [dest_path, nodes_to_extract, convert_sct, convert_db]()
+                const ExportOptions export_opts{
+                    .convert_sct_to_png = (g_state.common.export_sct_as_png != 0),
+                    .convert_db_to_json = (g_state.common.export_db_as_json != 0)
+                };
+                g_state.tasks.future = std::async(std::launch::async, [dest_path, nodes_to_extract, export_opts]()
                                          {
                     try {
-                        const float total = nodes_to_extract.empty() ? 1.0f : static_cast<float>(nodes_to_extract.size());
-                        for (size_t i = 0; i < nodes_to_extract.size(); i++)
-                        {
-                            std::atomic local_progress = 0.0f;
-                            g_state.browser.data_pack->Extract(*nodes_to_extract[i], dest_path, local_progress, convert_sct, convert_db);
-                            g_state.tasks.progress = static_cast<float>(i + 1) / total;
-                        }
+                        AssetExporter exporter;
+                        exporter.ExtractNodes(*g_state.browser.data_pack, nodes_to_extract, dest_path, export_opts, Core::ProgressReporter::FromAtomic(g_state.tasks.progress));
                     }
                     catch (...) {} });
             }

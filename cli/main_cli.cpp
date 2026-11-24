@@ -28,6 +28,7 @@
 #include "core/Logger.hpp"
 #include "archive/ArchiveFactory.hpp"
 #include "archive/IArchive.hpp"
+#include "services/AssetExporter.hpp"
 
 // //////////////////////////////////////////////////////////////////////////////////////////////////
 // //////////////////////////////////////////////////////////////////////////////////////////////////
@@ -455,23 +456,21 @@ static int parse_args(const std::vector<std::string>& args, CliOptions& out_opti
  * @param files_done Running count of files written, updated in place.
  * @param files_total Total files expected, used for the printed counter.
  */
-static void extract_verbose(IArchive& archive, const Core::FileNode& node, const std::filesystem::path& dest, const CliOptions& options, uint32_t& files_done, uint32_t files_total)
+static void extract_verbose(IArchive& archive, const AssetExporter& exporter, const Core::FileNode& node, const std::filesystem::path& dest, const CliOptions& options, uint32_t& files_done, uint32_t files_total)
 {
-    if (std::holds_alternative<Core::FileInfo>(node.data))
-    {
-        const auto& info = std::get<Core::FileInfo>(node.data);
-        const std::filesystem::path out_base = output_base_for(dest, node.full_path);
-
-        std::atomic<float> local_progress = 0.f;
-        archive.Extract(node, out_base.wstring(), local_progress, options.convert_sct_to_png, options.convert_db_to_json);
-
-        ++files_done;
-        std::cout << "  [" << files_done << "/" << files_total << "] " << node.full_path << "  (" << Core::FormatSize(info.size) << ")\n";
-        return;
-    }
-
-    for (const auto& child : std::get<Core::FolderInfo>(node.data).children)
-        extract_verbose(archive, child, dest, options, files_done, files_total);
+    const ExportOptions export_opts{options.convert_sct_to_png, options.convert_db_to_json};
+    const std::filesystem::path out_base = output_base_for(dest, node.full_path);
+    exporter.ExtractNode(
+        archive,
+        node,
+        out_base,
+        export_opts,
+        Core::ProgressReporter::Null(),
+        [&](const Core::FileNode& extracted) {
+            ++files_done;
+            const auto& info = std::get<Core::FileInfo>(extracted.data);
+            std::cout << "  [" << files_done << "/" << files_total << "] " << extracted.full_path << "  (" << Core::FormatSize(info.size) << ")\n";
+        });
 }
 
 // //////////////////////////////////////////////////////////////////////////////////////////////////
@@ -596,15 +595,17 @@ int main(int argc, char** argv)
         }
 
         bool ok = true;
+        AssetExporter exporter;
         if (options.verbose)
         {
             uint32_t files_done = 0;
-            ok = run_guarded([&] { extract_verbose(*archive, *folder.node, dest_path, options, files_done, folder.files); });
+            ok = run_guarded([&] { extract_verbose(*archive, exporter, *folder.node, dest_path, options, files_done, folder.files); });
         }
         else
         {
             // The bar tracks the current folder while the suffix shows progress across all of them.
             const std::filesystem::path out_base = output_base_for(dest_path, folder_path);
+            const ExportOptions export_opts{options.convert_sct_to_png, options.convert_db_to_json};
             auto suffix_fn = [&]
             {
                 const float local = std::min(1.0f, std::max(0.0f, progress.load()));
@@ -614,7 +615,7 @@ int main(int argc, char** argv)
                     : 100;
                 return "total " + std::to_string(total_percent) + "%";
             };
-            auto work = [&] { archive->Extract(*folder.node, out_base.wstring(), progress, options.convert_sct_to_png, options.convert_db_to_json); };
+            auto work = [&] { exporter.ExtractNode(*archive, *folder.node, out_base, export_opts, Core::ProgressReporter::FromAtomic(progress)); };
             ok = run_with_progress("  Extracting", progress, suffix_fn, work);
         }
 
