@@ -513,12 +513,12 @@ void draw_spine_panel(nk_context *ctx, float content_height, int window_width)
                                     }
                                 }
                                 exported += export_spine_atlas_and_images(entry, dest);
-                                g_state.tasks.status = "Exported " + std::to_string(exported) + " files for '" + entry.display_name + "'";
+                                g_state.tasks.runner.SetStatus("Exported " + std::to_string(exported) + " files for '" + entry.display_name + "'");
                             }
                         }
                         catch (const std::exception &e)
                         {
-                            g_state.tasks.status = "Export error: " + std::string(e.what());
+                            g_state.tasks.runner.SetStatus("Export error: " + std::string(e.what()));
                         }
                     }
                 }
@@ -769,7 +769,7 @@ void draw_spine_panel(nk_context *ctx, float content_height, int window_width)
                                 exported++;
                             }
                             exported += export_spine_atlas_and_images(entry, dest);
-                            g_state.tasks.status = "Exported " + std::to_string(exported) + " modified files";
+                            g_state.tasks.runner.SetStatus("Exported " + std::to_string(exported) + " modified files");
                         }
                     }
                     catch (...)

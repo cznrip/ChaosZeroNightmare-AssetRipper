@@ -271,33 +271,20 @@ void App::ProcessEvents() {
 }
 
 void App::CheckTasks() {
-    if (g_state.tasks.running && g_state.tasks.future.valid() &&
-        g_state.tasks.future.wait_for(std::chrono::seconds(0)) == std::future_status::ready)
+    if (const auto completed = g_state.tasks.runner.PollCompletion())
     {
-        g_state.tasks.running = false;
-        try
+        if (completed->succeeded)
         {
-            g_state.tasks.future.get();
+            if (completed->kind == Services::TaskKind::Scan)
+            {
+                g_state.tasks.scan_complete = true;
+                g_state.tasks.runner.SetStatus("Scan complete. " + std::to_string(Core::NodeFileCount(g_state.browser.data_pack->GetFileTree())) + " files found.");
+            }
+            else if (completed->kind == Services::TaskKind::Extract)
+            {
+                g_state.tasks.runner.SetStatus("Extraction complete.");
+            }
         }
-        catch (const std::exception &e)
-        {
-            g_state.tasks.status = "Error: " + std::string(e.what());
-        }
-        catch (...)
-        {
-            g_state.tasks.status = "Unknown error occurred";
-        }
-        g_state.tasks.progress = 1.0f;
-        if (g_state.tasks.kind == TaskKind::Scan)
-        {
-            g_state.tasks.scan_complete = true;
-            g_state.tasks.status = "Scan complete. " + std::to_string(Core::NodeFileCount(g_state.browser.data_pack->GetFileTree())) + " files found.";
-        }
-        else if (g_state.tasks.kind == TaskKind::Extract)
-        {
-            g_state.tasks.status = "Extraction complete.";
-        }
-        g_state.tasks.kind = TaskKind::None;
     }
 }
 
@@ -396,16 +383,16 @@ void App::Render() {
         nk_layout_row_dynamic(m_ctx, 4, 1);
         nk_spacing(m_ctx, 1);
 
-        if (g_state.tasks.running)
+        if (g_state.tasks.runner.IsRunning())
         {
             nk_layout_row_begin(m_ctx, NK_STATIC, 22, 2);
             nk_layout_row_push(m_ctx, 220);
-            float cur_progress = std::clamp(g_state.tasks.progress.load(), 0.0f, 1.0f);
+            float cur_progress = std::clamp(g_state.tasks.runner.Progress(), 0.0f, 1.0f);
             nk_size prog_val = cur_progress * 1000.0f;
             nk_progress(m_ctx, &prog_val, 1000, NK_FIXED);
             nk_layout_row_push(m_ctx, static_cast<float>(m_window_width) - 260);
             int percent = static_cast<int>(cur_progress * 100.0f);
-            std::string status_text = g_state.tasks.status + " (" + std::to_string(percent) + "%)";
+            std::string status_text = g_state.tasks.runner.Status() + " (" + std::to_string(percent) + "%)";
             nk_label_colored(m_ctx, status_text.c_str(), NK_TEXT_LEFT, nk_rgb(100, 200, 255));
             nk_layout_row_end(m_ctx);
         }
@@ -425,7 +412,7 @@ void App::Render() {
             }
             else
             {
-                nk_label_colored(m_ctx, g_state.tasks.status.c_str(), NK_TEXT_LEFT, nk_rgb(160, 160, 160));
+                nk_label_colored(m_ctx, g_state.tasks.runner.Status().c_str(), NK_TEXT_LEFT, nk_rgb(160, 160, 160));
             }
         }
     }

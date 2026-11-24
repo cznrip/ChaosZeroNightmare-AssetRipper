@@ -324,25 +324,25 @@ namespace {
                         std::ofstream out(save_path);
                         out << formatted_json;
                         out.close();
-                        g_state.tasks.status = "Exported " + format_name + " to JSON: " + save_path;
+                        g_state.tasks.runner.SetStatus("Exported " + format_name + " to JSON: " + save_path);
                     }
                     catch (const nlohmann::json::parse_error &e)
                     {
                         std::ofstream out(save_path);
                         out << json_str;
                         out.close();
-                        g_state.tasks.status = "Exported " + format_name + " to JSON (unformatted): " + save_path;
+                        g_state.tasks.runner.SetStatus("Exported " + format_name + " to JSON (unformatted): " + save_path);
                     }
                 }
                 else
                 {
-                    g_state.tasks.status = "Failed to convert " + format_name + " to JSON";
+                    g_state.tasks.runner.SetStatus("Failed to convert " + format_name + " to JSON");
                 }
             }
         }
         catch (const std::exception &e)
         {
-            g_state.tasks.status = "Export error: " + std::string(e.what());
+            g_state.tasks.runner.SetStatus("Export error: " + std::string(e.what()));
         }
     }
     class DBPreviewLoader : public IPreviewLoader {
@@ -512,7 +512,7 @@ void open_image_preview_window(const Core::FileNode &node)
         SDL_Surface *raw_surface = load_surface_from_node(node, err);
         if (!raw_surface)
         {
-            g_state.tasks.status = err;
+            g_state.tasks.runner.SetStatus(err);
             return;
         }
         const std::unique_ptr<SDL_Surface, decltype(&SDL_FreeSurface)> surface(raw_surface, SDL_FreeSurface);
@@ -553,7 +553,7 @@ void open_image_preview_window(const Core::FileNode &node)
 
         if (!g_state.image.window)
         {
-            g_state.tasks.status = "Failed to create preview window";
+            g_state.tasks.runner.SetStatus("Failed to create preview window");
             return;
         }
 
@@ -562,7 +562,7 @@ void open_image_preview_window(const Core::FileNode &node)
         {
             SDL_DestroyWindow(g_state.image.window);
             g_state.image.window = nullptr;
-            g_state.tasks.status = "Failed to create renderer";
+            g_state.tasks.runner.SetStatus("Failed to create renderer");
             return;
         }
 
@@ -574,13 +574,13 @@ void open_image_preview_window(const Core::FileNode &node)
             g_state.image.renderer = nullptr;
             SDL_DestroyWindow(g_state.image.window);
             g_state.image.window = nullptr;
-            g_state.tasks.status = "Failed to create texture";
+            g_state.tasks.runner.SetStatus("Failed to create texture");
             return;
         }
     }
     catch (const std::exception &e)
     {
-        g_state.tasks.status = "Error opening image window: " + std::string(e.what());
+        g_state.tasks.runner.SetStatus("Error opening image window: " + std::string(e.what()));
     }
 }
 
@@ -620,13 +620,13 @@ void export_file_as_png(const Core::FileNode &node)
                 std::ofstream out(save_path, std::ios::binary);
                 out.write(reinterpret_cast<const char *>(png_data.data()), png_data.size());
                 out.close();
-                g_state.tasks.status = "Exported to: " + save_path;
+                g_state.tasks.runner.SetStatus("Exported to: " + save_path);
             }
         }
     }
     catch (const std::exception &e)
     {
-        g_state.tasks.status = "Export error: " + std::string(e.what());
+        g_state.tasks.runner.SetStatus("Export error: " + std::string(e.what()));
     }
 }
 
@@ -640,12 +640,12 @@ void export_file_as_sct(const Core::FileNode &node)
             std::ofstream out(save_path, std::ios::binary);
             out.write(reinterpret_cast<const char *>(file_data.data()), file_data.size());
             out.close();
-            g_state.tasks.status = "Exported to: " + save_path;
+            g_state.tasks.runner.SetStatus("Exported to: " + save_path);
         }
     }
     catch (const std::exception &e)
     {
-        g_state.tasks.status = "Export error: " + std::string(e.what());
+        g_state.tasks.runner.SetStatus("Export error: " + std::string(e.what()));
     }
 }
 
@@ -855,7 +855,7 @@ void draw_preview_panel(nk_context *ctx, float right_width, float content_height
                             {
                                 out << g_state.preview.text_full;
                                 out.close();
-                                g_state.tasks.status = "Saved to: " + save_path;
+                                g_state.tasks.runner.SetStatus("Saved to: " + save_path);
                             }
                         }
                     }
@@ -931,7 +931,7 @@ void draw_preview_panel(nk_context *ctx, float right_width, float content_height
                         {
                             out << data_to_save;
                             out.close();
-                            g_state.tasks.status = "Saved to: " + save_path;
+                            g_state.tasks.runner.SetStatus("Saved to: " + save_path);
                         }
                     }
                 }

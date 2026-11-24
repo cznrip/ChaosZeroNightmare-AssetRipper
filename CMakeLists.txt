@@ -32,6 +32,7 @@ set(CZN_CORE_SOURCES
     archive/SsraArchive.cpp
     converters/AssetConverter.cpp
     services/AssetExporter.cpp
+    services/FileMap.cpp
     parsers/SctParser.cpp
     parsers/DbParser.cpp
     parsers/ScspParser.cpp

@@ -129,7 +129,7 @@ void draw_options_popup(nk_context *ctx, const int window_width, const int windo
         {
             save_options_to_ini();
             g_state.common.show_options = false;
-            g_state.tasks.status = "Options saved";
+            g_state.tasks.runner.SetStatus("Options saved");
         }
         if (nk_button_label(ctx, "Cancel"))
         {
@@ -301,7 +301,7 @@ void draw_context_menu(nk_context *ctx)
                         std::ofstream out(save_path, std::ios::binary);
                         out.write(reinterpret_cast<const char *>(file_data.data()), file_data.size());
                         out.close();
-                        g_state.tasks.status = "Extracted to: " + save_path;
+                        g_state.tasks.runner.SetStatus("Extracted to: " + save_path);
                     }
                 }
                 catch (...)

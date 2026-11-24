@@ -25,6 +25,8 @@
 #include "core/Core.hpp"
 #include "archive/IArchive.hpp"
 #include "parsers/SpineCatalog.hpp"
+#include "services/AsyncTaskRunner.hpp"
+#include "services/FileMap.hpp"
 
 class SpineViewer;
 
@@ -52,16 +54,10 @@ struct FileBrowserState
     std::string search_query;
 };
 
-enum class TaskKind { None, Scan, Extract };
-
 struct TaskState
 {
-    std::future<void> future;
-    std::atomic<float> progress = 0.f;
-    std::atomic<bool> running = false;
+    Services::AsyncTaskRunner runner;
     std::atomic<bool> scan_complete = false;
-    TaskKind kind = TaskKind::None;
-    std::string status = "Select a data.pack file to begin.";
 };
 
 enum class PreviewMode
@@ -156,24 +152,6 @@ struct SpineViewerState
     char bone_search_buf[128] = {};
     bool bone_just_reset = false;
     bool link_scale = true;
-};
-
-enum class DiffStatus
-{
-    Unchanged,
-    Added,
-    Modified,
-    Removed
-};
-
-struct DiffNode
-{
-    std::string name, full_path;
-    bool is_folder = false;
-    uint64_t size = 0;
-    std::string format;
-    DiffStatus status = DiffStatus::Unchanged;
-    std::vector<std::unique_ptr<DiffNode>> children;
 };
 
 struct DiffViewerState
