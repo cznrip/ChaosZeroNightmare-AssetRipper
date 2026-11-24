@@ -27,7 +27,8 @@ set(CZN_CORE_SOURCES
     core/AppSettings.cpp
     archive/ArchiveBase.cpp
     archive/ArchiveFactory.cpp
-    archive/DataPack.cpp
+    archive/DataPackArchive.cpp
+    archive/DirectoryArchive.cpp
     archive/SsraArchive.cpp
     parsers/SctParser.cpp
     parsers/DbParser.cpp
