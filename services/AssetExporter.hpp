@@ -9,10 +9,6 @@
 #include <functional>
 #include <vector>
 
-/**
- * Orchestrates single-file, subtree, and batch archive extraction using AssetConverter.
- * Decouples archive reading (IArchive) from format conversion and filesystem writing.
- */
 class AssetExporter {
 public:
     using FileExtractedCallback = std::function<void(const Core::FileNode&)>;

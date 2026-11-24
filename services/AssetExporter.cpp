@@ -6,10 +6,10 @@
 #include <format>
 #include <fstream>
 
-bool AssetExporter::WriteBinaryFile(const std::filesystem::path& path, std::span<const uint8_t> data) {
-    std::error_code ec;
+bool AssetExporter::WriteBinaryFile(const std::filesystem::path& path, const std::span<const uint8_t> data) {
     if (const auto parent = path.parent_path(); !parent.empty()) {
-        std::filesystem::create_directories(parent, ec);
+        std::error_code error_code;
+        std::filesystem::create_directories(parent, error_code);
     }
 
     std::ofstream out(path, std::ios::binary);
@@ -110,27 +110,27 @@ void AssetExporter::ExtractRecursive(
     const Core::FileNode& node,
     const std::filesystem::path& current_dir,
     uint64_t& extracted_bytes,
-    uint64_t total_bytes,
+    const uint64_t total_bytes,
     const ExportOptions& options,
     const Core::ProgressReporter& progress,
     const FileExtractedCallback& on_file) const
 {
     try {
-        if (const auto* info = std::get_if<Core::FileInfo>(&node.data)) {
-            LogInfo(std::format("Extracting file: {} size={}", node.name, info->size));
+        if (const auto* file_info = std::get_if<Core::FileInfo>(&node.data)) {
+            LogInfo(std::format("Extracting file: {} size={}", node.name, file_info->size));
 
-            std::filesystem::path final_path = current_dir / Core::Utf8ToWString(node.name);
-            const std::string target_ext = m_converter.ResolveExtension(info->format, options);
-            if (target_ext != info->format) {
-                final_path.replace_extension(Core::Utf8ToWString(target_ext));
+            std::filesystem::path output_path = current_dir / Core::Utf8ToWString(node.name);
+            const std::string target_ext = m_converter.ResolveExtension(file_info->format, options);
+            if (target_ext != file_info->format) {
+                output_path.replace_extension(Core::Utf8ToWString(target_ext));
             }
 
             if (const std::vector<uint8_t> raw = archive.GetFileData(node); !raw.empty()) {
-                const ConvertedAsset asset = m_converter.Convert(raw, node.name, info->format, options);
-                WriteBinaryFile(final_path, asset.data);
+                const ConvertedAsset asset = m_converter.Convert(raw, node.name, file_info->format, options);
+                WriteBinaryFile(output_path, asset.data);
             }
 
-            extracted_bytes += info->size;
+            extracted_bytes += file_info->size;
             progress.Report(static_cast<float>(extracted_bytes) / static_cast<float>(total_bytes));
             if (on_file) {
                 on_file(node);
