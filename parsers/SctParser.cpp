@@ -44,7 +44,7 @@ namespace {
     };
 
     struct SctHeader {
-        int pixel_format = 0;
+        TextureFormat pixel_format = TextureFormat::Unknown;
         uint16_t width = 0;
         uint16_t height = 0;
         uint16_t texture_width = 0;
@@ -125,8 +125,8 @@ namespace {
         return it->second.Get();
     }
 
-    ContainerFormat DetectContainerFormat(std::span<const uint8_t> data) noexcept {
-        Core::BinaryReader reader(data);
+    ContainerFormat DetectContainerFormat(const std::span<const uint8_t> data) noexcept {
+        const Core::BinaryReader reader(data);
         if (const auto sig = reader.PeekAt<int32_t>(0); sig && *sig == kSct2Signature) {
             return ContainerFormat::Sct2;
         }
@@ -138,14 +138,14 @@ namespace {
         return ContainerFormat::Unknown;
     }
 
-    SctHeader ParseSctHeader(std::span<const uint8_t> data) {
+    SctHeader ParseSctHeader(const std::span<const uint8_t> data) {
         if (data.size() < 9) {
             throw std::runtime_error("File too small to contain a valid SCT header");
         }
         Core::BinaryReader reader(data);
         SctHeader header{};
         reader.Skip(4);
-        header.pixel_format = reader.Read<uint8_t>();
+        header.pixel_format = static_cast<TextureFormat>(reader.Read<uint8_t>());
         header.width = reader.Read<uint16_t>();
         header.height = reader.Read<uint16_t>();
         header.texture_width = header.width;
@@ -155,20 +155,20 @@ namespace {
         return header;
     }
 
-    SctHeader ParseSct2Header(std::span<const uint8_t> data) {
+    SctHeader ParseSct2Header(const std::span<const uint8_t> data) {
         if (data.size() < 34) {
             throw std::runtime_error("File too small to contain a valid SCT2 header");
         }
         Core::BinaryReader reader(data);
         SctHeader header{};
         reader.Skip(12); // signature(4) + total_size(4) + unk(4)
-        const int32_t offset = reader.Read<int32_t>();
+        const auto offset = reader.Read<int32_t>();
         if (offset < 0 || static_cast<size_t>(offset) > data.size()) {
             throw std::runtime_error("Invalid SCT2 data offset");
         }
         header.data_offset = static_cast<size_t>(offset);
         reader.Skip(4);
-        header.pixel_format = reader.Read<int32_t>();
+        header.pixel_format = static_cast<TextureFormat>(reader.Read<int32_t>());
         header.width = reader.Read<uint16_t>();
         header.height = reader.Read<uint16_t>();
         header.texture_width = reader.Read<uint16_t>();
@@ -181,37 +181,15 @@ namespace {
         return header;
     }
 
-    TextureFormat ClassifyTextureFormat(int format_code) noexcept {
-        switch (format_code) {
-            case 4:   return TextureFormat::Rgb565Le;
-            case 6:   return TextureFormat::Rgb;
-            case 16:  return TextureFormat::Rgb565Le;
-            case 19:  return TextureFormat::Etc2Rgba8;
-            case 40:  return TextureFormat::Astc4x4;
-            case 44:  return TextureFormat::Astc6x6;
-            case 47:  return TextureFormat::Astc8x8;
-            case 102: return TextureFormat::L8;
-            default:
-                if (format_code >= 17 && format_code <= 26) {
-                    return TextureFormat::RgbaRaw;
-                }
-                return TextureFormat::Unknown;
-        }
-    }
-
-    /**
-     * Attempts heuristic LZ4 decompression once and returns the decompressed payload
-     * directly if decompression makes sense, avoiding double decompression.
-     */
-    std::optional<std::vector<uint8_t>> TryHeuristicLz4Decompress(
-        std::span<const uint8_t> image_data,
-        int width,
-        int height,
-        int pixel_format)
+    std::optional<std::vector<uint8_t>> TryLz4Decompress(
+        const std::span<const uint8_t> image_data,
+        const int width,
+        const int height,
+        const TextureFormat texture_format)
     {
         if (image_data.size() < 8) return std::nullopt;
 
-        const double expected_size = (pixel_format == 40)
+        const double expected_size = (texture_format == TextureFormat::Astc4x4)
             ? static_cast<double>(((width + 3) / 4) * ((height + 3) / 4) * 16)
             : static_cast<double>(width * height * 2);
 
@@ -223,14 +201,13 @@ namespace {
         auto decompressed = Core::TryDecompressLz4WithHeader(image_data, false);
         if (!decompressed || decompressed->empty()) return std::nullopt;
 
-        const double decomp_ratio = static_cast<double>(decompressed->size()) / expected_size;
-        if (decomp_ratio > size_ratio) {
+        if (const double decomp_ratio = static_cast<double>(decompressed->size()) / expected_size; decomp_ratio > size_ratio) {
             return decompressed;
         }
         return std::nullopt;
     }
 
-    std::vector<uint8_t> DecodeRgb565LeToRgba(std::span<const uint8_t> data) {
+    std::vector<uint8_t> DecodeRgb565LeToRgba(const std::span<const uint8_t> data) {
         const size_t pixel_count = data.size() / 2;
         std::vector<uint8_t> rgba(pixel_count * 4);
         Core::BinaryReader reader(data);
@@ -244,7 +221,7 @@ namespace {
         return rgba;
     }
 
-    std::vector<uint8_t> DecodeL8ToRgba(std::span<const uint8_t> data) {
+    std::vector<uint8_t> DecodeL8ToRgba(const std::span<const uint8_t> data) {
         std::vector<uint8_t> rgba(data.size() * 4);
         for (size_t i = 0; i < data.size(); ++i) {
             const uint8_t gray = data[i];
@@ -257,11 +234,11 @@ namespace {
     }
 
     std::vector<uint8_t> DecodeAstc(
-        std::span<const uint8_t> compressed_data,
-        int width,
-        int height,
-        int block_w,
-        int block_h)
+        const std::span<const uint8_t> compressed_data,
+        const int width,
+        const int height,
+        const int block_w,
+        const int block_h)
     {
         if (width <= 0 || height <= 0 || width > kMaxTextureDim || height > kMaxTextureDim) {
             LogError("ASTC decode: invalid dimensions");
@@ -270,8 +247,7 @@ namespace {
 
         const int blocks_x = (width + block_w - 1) / block_w;
         const int blocks_y = (height + block_h - 1) / block_h;
-        const size_t expected_size = static_cast<size_t>(blocks_x) * static_cast<size_t>(blocks_y) * 16;
-        if (compressed_data.size() < expected_size) {
+        if (const size_t expected_size = static_cast<size_t>(blocks_x) * static_cast<size_t>(blocks_y) * 16; compressed_data.size() < expected_size) {
             LogError(std::format("ASTC data too small: expected {}, got {}", expected_size, compressed_data.size()));
             return {};
         }
@@ -291,9 +267,8 @@ namespace {
         image.data_type = ASTCENC_TYPE_U8;
         image.data = &data_ptr;
 
-        // Decode directly into RGBA order (avoids redundant BGRA->RGBA swap pass).
         constexpr astcenc_swizzle kRgbaSwizzle = {
-            ASTCENC_SWZ_R, ASTCENC_SWZ_G, ASTCENC_SWZ_B, ASTCENC_SWZ_A
+            .r = ASTCENC_SWZ_R, .g = ASTCENC_SWZ_G, .b = ASTCENC_SWZ_B, .a = ASTCENC_SWZ_A
         };
 
         const astcenc_error status = astcenc_decompress_image(
@@ -307,16 +282,15 @@ namespace {
         return rgba;
     }
 
-    std::vector<uint8_t> DecodeEtc2Rgba8(std::span<const uint8_t> compressed_data, int width, int height) {
+    std::vector<uint8_t> DecodeEtc2Rgba8(const std::span<const uint8_t> compressed_data, const int width, const int height) {
         constexpr int kBlockW = 4;
         constexpr int kBlockH = 4;
         constexpr int kBlockBytes = 16;
 
         const int num_blocks_x = (width + kBlockW - 1) / kBlockW;
         const int num_blocks_y = (height + kBlockH - 1) / kBlockH;
-        const size_t expected_size = static_cast<size_t>(num_blocks_x) * num_blocks_y * kBlockBytes;
 
-        if (compressed_data.size() < expected_size) {
+        if (const size_t expected_size = static_cast<size_t>(num_blocks_x) * num_blocks_y * kBlockBytes; compressed_data.size() < expected_size) {
             return std::vector<uint8_t>(static_cast<size_t>(width) * height * 4, 128);
         }
 
@@ -335,8 +309,8 @@ namespace {
                     for (int x = 0; x < kBlockW; ++x) {
                         const int final_x = bx * kBlockW + x;
                         if (final_x >= width) continue;
-                        const size_t block_idx = static_cast<size_t>((y * kBlockW + x) * 4);
-                        const size_t final_idx = static_cast<size_t>((final_y * width + final_x) * 4);
+                        const auto block_idx = static_cast<size_t>((y * kBlockW + x) * 4);
+                        const auto final_idx = static_cast<size_t>((final_y * width + final_x) * 4);
                         std::copy_n(block_pixels.data() + block_idx, 4, rgba.data() + final_idx);
                     }
                 }
@@ -347,13 +321,13 @@ namespace {
 
 } // namespace
 
-SctParser::RgbaImage SctParser::ConvertToRgba(std::span<const uint8_t> data) {
+SctParser::RgbaImage SctParser::ConvertToRgba(const std::span<const uint8_t> data) {
     try {
         const ContainerFormat container = DetectContainerFormat(data);
         if (container == ContainerFormat::Unknown) return {};
 
         SctHeader header{};
-        std::vector<uint8_t> decompressed_storage;
+        std::vector<uint8_t> decompressed_data;
         std::span<const uint8_t> payload;
 
         if (container == ContainerFormat::Sct2) {
@@ -361,19 +335,19 @@ SctParser::RgbaImage SctParser::ConvertToRgba(std::span<const uint8_t> data) {
             payload = data.subspan(header.data_offset);
 
             if (header.raw_data || header.has_alpha) {
-                if (auto decomp = TryHeuristicLz4Decompress(payload, header.width, header.height, header.pixel_format)) {
-                    decompressed_storage = std::move(*decomp);
-                    payload = decompressed_storage;
+                if (const auto decomp = TryLz4Decompress(payload, header.width, header.height, header.pixel_format)) {
+                    decompressed_data = *decomp;
+                    payload = decompressed_data;
                 }
-            } else if (header.pixel_format == 40 || header.compressed) {
-                decompressed_storage = Core::DecompressLz4WithHeader(payload, false);
-                payload = decompressed_storage;
+            } else if (header.pixel_format == TextureFormat::Astc4x4 || header.compressed) {
+                decompressed_data = Core::DecompressLz4WithHeader(payload, false);
+                payload = decompressed_data;
             }
         } else {
             header = ParseSctHeader(data);
             payload = data.subspan(header.data_offset);
-            decompressed_storage = Core::DecompressLz4WithHeader(payload, false);
-            payload = decompressed_storage;
+            decompressed_data = Core::DecompressLz4WithHeader(payload, false);
+            payload = decompressed_data;
         }
 
         const int width = header.width;
@@ -384,7 +358,7 @@ SctParser::RgbaImage SctParser::ConvertToRgba(std::span<const uint8_t> data) {
         }
 
         std::vector<uint8_t> rgba;
-        switch (ClassifyTextureFormat(header.pixel_format)) {
+        switch (header.pixel_format) {
             case TextureFormat::L8:
                 rgba = DecodeL8ToRgba(payload);
                 break;
@@ -413,21 +387,21 @@ SctParser::RgbaImage SctParser::ConvertToRgba(std::span<const uint8_t> data) {
             return {};
         }
 
-        return RgbaImage{std::move(rgba), width, height};
+        return RgbaImage{.data = std::move(rgba), .width = width, .height = height};
     } catch (const std::exception& e) {
         LogError(std::string("SctParser::ConvertToRgba exception: ") + e.what());
         return {};
     }
 }
 
-std::vector<uint8_t> SctParser::ConvertToPng(std::span<const uint8_t> data) {
+std::vector<uint8_t> SctParser::ConvertToPng(const std::span<const uint8_t> data) {
     auto [image, width, height] = ConvertToRgba(data);
     if (image.empty()) return {};
 
     std::vector<uint8_t> png_data;
-    auto write_func = [](void* context, void* buf, const int size) {
+    auto write_func = [](void* context, void* buffer, const int size) {
         auto* vec = static_cast<std::vector<uint8_t>*>(context);
-        const auto* bytes = static_cast<const uint8_t*>(buf);
+        const auto* bytes = static_cast<const uint8_t*>(buffer);
         vec->insert(vec->end(), bytes, bytes + size);
     };
 
