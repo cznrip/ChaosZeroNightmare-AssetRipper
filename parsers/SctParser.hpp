@@ -1,14 +1,18 @@
 #pragma once
-#include <vector>
+
 #include <cstdint>
+#include <span>
+#include <vector>
 
 namespace SctParser {
+
     struct RgbaImage {
         std::vector<uint8_t> data;
         int width = 0;
         int height = 0;
     };
 
-    RgbaImage ConvertToRgba(const std::vector<uint8_t> &data);
-    std::vector<uint8_t> ConvertToPng(const std::vector<uint8_t> &data);
-}
+    [[nodiscard]] RgbaImage ConvertToRgba(std::span<const uint8_t> data);
+    [[nodiscard]] std::vector<uint8_t> ConvertToPng(std::span<const uint8_t> data);
+
+} // namespace SctParser

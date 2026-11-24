@@ -1,9 +1,15 @@
-#include "SctParser.hpp"
-#include <iostream>
-#include <map>
-#include <algorithm>
-#include <stdexcept>
+#include "parsers/SctParser.hpp"
+#include "core/BinaryReader.hpp"
+#include "core/Compression.hpp"
 #include "core/Logger.hpp"
+
+#include <algorithm>
+#include <array>
+#include <format>
+#include <map>
+#include <optional>
+#include <stdexcept>
+#include <utility>
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
@@ -13,547 +19,420 @@
 #include <astcenc.h>
 
 namespace {
-    constexpr int SCT2_SIGNATURE = 844383059;
-    constexpr int SCT_SIGNATURE_WORD = 17235;
-    constexpr uint8_t SCT_SIGNATURE_BYTE = 84;
 
-    enum class Format {
-        Unknown = -1,
-        SCT = 10001,
-        SCT2 = 10002
+    constexpr int32_t kSct2Signature = 844383059;
+    constexpr uint16_t kSctSignatureWord = 17235;
+    constexpr uint8_t kSctSignatureByte = 84;
+    constexpr int kMaxTextureDim = 16384;
+
+    enum class ContainerFormat {
+        Unknown,
+        Sct,
+        Sct2
     };
 
-    struct Header {
-        std::vector<uint8_t> signature;
+    enum class TextureFormat {
+        Unknown,
+        L8,
+        Rgb565Le,
+        Rgb,
+        Etc2Rgba8,
+        Astc4x4,
+        Astc6x6,
+        Astc8x8,
+        RgbaRaw
+    };
+
+    struct SctHeader {
         int pixel_format = 0;
         uint16_t width = 0;
         uint16_t height = 0;
         uint16_t texture_width = 0;
         uint16_t texture_height = 0;
-        int data_offset = 0;
+        size_t data_offset = 0;
         bool compressed = false;
-        int total_size = 0;
         uint8_t flags = 0;
         bool has_alpha = false;
-        bool crop_flag = false;
         bool raw_data = false;
-        bool mipmap_flag2 = false;
     };
 
-    struct PixelFormatInfo {
-        std::string format;
-        int channels{};
-        std::string type;
+    /**
+     * RAII wrapper for astcenc_context* cached thread-locally per block dimension
+     * so bulk texture extraction avoids allocating/destroying a decoder context per image.
+     */
+    class AstcContext {
+    public:
+        AstcContext() = default;
+        explicit AstcContext(astcenc_context* ctx) noexcept : m_ctx(ctx) {}
+        ~AstcContext() { Reset(); }
+
+        AstcContext(const AstcContext&) = delete;
+        AstcContext& operator=(const AstcContext&) = delete;
+
+        AstcContext(AstcContext&& other) noexcept
+            : m_ctx(std::exchange(other.m_ctx, nullptr)) {}
+
+        AstcContext& operator=(AstcContext&& other) noexcept {
+            if (this != &other) {
+                Reset();
+                m_ctx = std::exchange(other.m_ctx, nullptr);
+            }
+            return *this;
+        }
+
+        void Reset() noexcept {
+            if (m_ctx) {
+                astcenc_context_free(m_ctx);
+                m_ctx = nullptr;
+            }
+        }
+
+        [[nodiscard]] astcenc_context* Get() const noexcept { return m_ctx; }
+
+    private:
+        astcenc_context* m_ctx = nullptr;
     };
 
-    Format DetectFormat(const std::vector<uint8_t>& data) {
-        if (data.size() < 4) {
-            return Format::Unknown;
-        }
+    astcenc_context* GetCachedAstcContext(int block_w, int block_h) {
+        thread_local std::map<std::pair<int, int>, AstcContext> cache;
+        const auto key = std::make_pair(block_w, block_h);
 
-        if (const int signature = *reinterpret_cast<const int*>(data.data()); signature == SCT2_SIGNATURE) {
-            return Format::SCT2;
-        }
-
-        if (data.size() >= 3) {
-            const uint16_t word = *reinterpret_cast<const uint16_t*>(data.data());
-            const uint8_t b = data[2];
-
-            if (word == SCT_SIGNATURE_WORD && b == SCT_SIGNATURE_BYTE) {
-                return Format::SCT;
-            }
-        }
-        return Format::Unknown;
-    }
-
-    Header ParseSCTHeader(const std::vector<uint8_t>& data) {
-        if (data.size() < 9)
-            throw std::runtime_error("File too small to contain a valid SCT header");
-
-        Header header;
-        header.signature = { data[0], data[1], data[2] };
-        header.pixel_format = data[4];
-        header.width = *reinterpret_cast<const uint16_t*>(&data[5]);
-        header.height = *reinterpret_cast<const uint16_t*>(&data[7]);
-        header.data_offset = 9;
-        header.compressed = true;
-        header.texture_width = header.width;
-        header.texture_height = header.height;
-        header.flags = 0;
-        header.has_alpha = false;
-
-        return header;
-    }
-
-    Header ParseSCT2Header(const std::vector<uint8_t>& data) {
-        if (data.size() < 34)
-            throw std::runtime_error("File too small to contain a valid SCT2 header");
-
-        Header header;
-        header.signature = { data[0], data[1], data[2], data[3] };
-        header.total_size = *reinterpret_cast<const int*>(&data[4]);
-        header.data_offset = *reinterpret_cast<const int*>(&data[12]);
-        header.pixel_format = *reinterpret_cast<const int*>(&data[20]);
-        header.width = *reinterpret_cast<const uint16_t*>(&data[24]);
-        header.height = *reinterpret_cast<const uint16_t*>(&data[26]);
-        header.texture_width = *reinterpret_cast<const uint16_t*>(&data[28]);
-        header.texture_height = *reinterpret_cast<const uint16_t*>(&data[30]);
-        header.flags = data[32];
-
-        header.has_alpha = (header.flags & 0x01) != 0;
-        header.crop_flag = (header.flags & 0x02) != 0;
-        header.raw_data = (header.flags & 0x10) != 0;
-        header.mipmap_flag2 = (header.flags & 0x20) != 0;
-        header.compressed = (header.flags & 0x80) != 0;
-
-        return header;
-    }
-
-    std::vector<uint8_t> LZ4Decompress(const std::vector<uint8_t>& compressed_data) {
-        if (compressed_data.size() < 8)
-            throw std::runtime_error("Compressed data too short");
-
-        const int decompressed_size = *reinterpret_cast<const int*>(compressed_data.data());
-        *reinterpret_cast<const int*>(compressed_data.data() + 4);
-
-        std::vector<uint8_t> dst(decompressed_size);
-        size_t src_pos = 8;
-        size_t dst_pos = 0;
-
-        while (src_pos < compressed_data.size() && dst_pos < static_cast<size_t>(decompressed_size)) {
-            if (src_pos >= compressed_data.size()) break;
-
-            const uint8_t token = compressed_data[src_pos++];
-            int literal_length = (token >> 4) & 0x0F;
-            int match_length = token & 0x0F;
-
-            if (literal_length == 15) {
-                while (src_pos < compressed_data.size()) {
-                    uint8_t extra = compressed_data[src_pos++];
-                    literal_length += extra;
-                    if (extra != 255) break;
-                }
-            }
-
-            if (literal_length > 0) {
-                if (src_pos + literal_length > compressed_data.size())
-                    literal_length = compressed_data.size() - src_pos;
-                if (dst_pos + literal_length > dst.size())
-                    literal_length = dst.size() - dst_pos;
-
-                std::memcpy(dst.data() + dst_pos, compressed_data.data() + src_pos, literal_length);
-                src_pos += literal_length;
-                dst_pos += literal_length;
-            }
-
-            if (src_pos >= compressed_data.size() || dst_pos >= static_cast<size_t>(decompressed_size))
-                break;
-
-            if (src_pos + 1 >= compressed_data.size()) break;
-
-            const uint16_t offset = *reinterpret_cast<const uint16_t*>(compressed_data.data() + src_pos);
-            src_pos += 2;
-
-            if (match_length == 15) {
-                while (src_pos < compressed_data.size()) {
-                    uint8_t extra = compressed_data[src_pos++];
-                    match_length += extra;
-                    if (extra != 255) break;
-                }
-            }
-
-            match_length += 4;
-
-            int match_start = dst_pos - offset;
-            if (match_start < 0) break;
-
-            for (int i = 0; i < match_length && dst_pos < static_cast<size_t>(decompressed_size) && match_start + i < static_cast<int>(dst_pos); i++) {
-                dst[dst_pos++] = dst[match_start + i];
-            }
-        }
-
-        if (dst_pos < static_cast<size_t>(decompressed_size)) {
-            dst.resize(dst_pos);
-        }
-
-        return dst;
-    }
-
-    std::vector<uint8_t> RGB565LEToRGB(const std::vector<uint8_t>& data) {
-        std::vector<uint8_t> rgb_data;
-        rgb_data.reserve((data.size() / 2) * 3);
-
-        for (size_t i = 0; i + 1 < data.size(); i += 2) {
-            const uint16_t pixel = *reinterpret_cast<const uint16_t*>(&data[i]);
-
-            uint8_t r = ((pixel >> 11) & 0x1F) << 3;
-            uint8_t g = ((pixel >> 5) & 0x3F) << 2;
-            uint8_t b = (pixel & 0x1F) << 3;
-
-            rgb_data.push_back(r);
-            rgb_data.push_back(g);
-            rgb_data.push_back(b);
-        }
-
-        return rgb_data;
-    }
-
-    std::vector<uint8_t> RGBToRGBA(const std::vector<uint8_t>& rgb_data) {
-        std::vector<uint8_t> rgba(rgb_data.size() / 3 * 4);
-
-        for (size_t i = 0, j = 0; i < rgb_data.size() - 2; i += 3, j += 4) {
-            rgba[j] = rgb_data[i];
-            rgba[j + 1] = rgb_data[i + 1];
-            rgba[j + 2] = rgb_data[i + 2];
-            rgba[j + 3] = 255;
-        }
-
-        return rgba;
-    }
-
-    void BGRASwapRB(std::vector<uint8_t>& buffer) {
-        for (size_t i = 0; i + 3 < buffer.size(); i += 4) {
-            std::swap(buffer[i], buffer[i + 2]);
-        }
-    }
-
-    std::vector<uint8_t> L8ToRGBA(const std::vector<uint8_t>& data) {
-        std::vector<uint8_t> rgba(data.size() * 4);
-
-        for (size_t i = 0; i < data.size(); i++) {
-            const uint8_t gray = data[i];
-            rgba[i * 4 + 0] = gray;  // R
-            rgba[i * 4 + 1] = gray;  // G
-            rgba[i * 4 + 2] = gray;  // B
-            rgba[i * 4 + 3] = 255;   // A
-        }
-
-        return rgba;
-    }
-
-    PixelFormatInfo GetPixelFormatInfo(const int format_code) {
-        static const std::map<int, PixelFormatInfo> format_map = {
-            {4, {"RGB", 3, "RGB565_LE"}},
-            {6, {"RGB", 3, "RGB"}},
-            {16, {"RGB", 3, "RGB565"}},
-            {19, {"RGBA", 4, "ETC2_RGBA8"}},
-            {40, {"RGBA", 4, "ASTC_4x4"}},
-            {44, {"RGBA", 4, "ASTC_6x6"}},
-            {47, {"RGBA", 4, "ASTC_8x8"}},
-            {102, {"L", 1, "L8"}}
-        };
-
-        if (const auto it = format_map.find(format_code); it != format_map.end()) {
-            return it->second;
-        }
-
-        if (format_code >= 17 && format_code <= 26 && format_code != 19 && format_code != 40) {
-            return { "RGBA", 4, "RGBA" };
-        }
-
-        if (std::vector<int> excluded = { 44, 47 }; format_code >= 41 && format_code <= 53 &&
-            std::find(excluded.begin(), excluded.end(), format_code) == excluded.end())
-        {
-            return { "RGBA", 4, "COMPRESSED" };
-        }
-
-        return { "RGBA", 4, "UNKNOWN" };
-    }
-
-    bool ShouldDecompress(const std::vector<uint8_t>& image_data, const int width, const int height, const int pixel_format) {
-        if (image_data.size() < 8) return false;
-
-        int expected_astc_size;
-        if (pixel_format == 40) {
-            const int blocks_w = (width + 3) / 4;
-            const int blocks_h = (height + 3) / 4;
-            expected_astc_size = blocks_w * blocks_h * 16;
-        }
-        else {
-            expected_astc_size = width * height * 2;
-        }
-
-        double size_ratio = static_cast<double>(image_data.size()) / expected_astc_size;
-
-        double decomp_ratio = 0;
-        bool lz4_works = false;
-
-        try {
-            const std::vector<uint8_t> decompressed = LZ4Decompress(image_data);
-            decomp_ratio = static_cast<double>(decompressed.size()) / expected_astc_size;
-            lz4_works = !decompressed.empty();
-        }
-        catch (...) {
-            decomp_ratio = 0;
-            lz4_works = false;
-        }
-
-        const bool should_decompress = (size_ratio < 0.95 && lz4_works && decomp_ratio > size_ratio);
-
-        return should_decompress;
-    }
-
-    void initialize_astc() {
-        static bool is_initialized = false;
-        if (!is_initialized) {
-            astcenc_config config{};
-            astcenc_error status = astcenc_config_init(
-                ASTCENC_PRF_LDR,
-                4, 4, 1,
-                ASTCENC_PRE_FASTEST,
-                0,
-                &config
-            );
-
-            if (status == ASTCENC_SUCCESS) {
-                astcenc_context* context;
-                if (astcenc_context_alloc(&config, 1, &context) == ASTCENC_SUCCESS) {
-                    astcenc_context_free(context);
-                }
-            }
-            is_initialized = true;
-        }
-    }
-
-    std::vector<uint8_t> DecodeASTC(const std::vector<uint8_t>& compressed_data, const int width, const int height, const int block_width, const int block_height) {
-        initialize_astc();
-
-        if (width <= 0 || height <= 0 || width > 16384 || height > 16384) {
-            LogError("ASTC decode: invalid dimensions");
-            return {};
-        }
-        const int blocks_x = (width + block_width - 1) / block_width;
-        const int blocks_y = (height + block_height - 1) / block_height;
-        if (const size_t expected_size = static_cast<size_t>(blocks_x) * static_cast<size_t>(blocks_y) * 16; compressed_data.size() < expected_size) {
-            LogError(std::string("ASTC data too small: expected ") + std::to_string(expected_size) + ", got " + std::to_string(compressed_data.size()));
-            return {};
+        if (const auto it = cache.find(key); it != cache.end()) {
+            return it->second.Get();
         }
 
         astcenc_config config{};
-        astcenc_error status = astcenc_config_init(
-            ASTCENC_PRF_LDR,
-            block_width, block_height, 1,
-            ASTCENC_PRE_FASTEST,
-            0,
-            &config
-        );
-
-        if (status != ASTCENC_SUCCESS) {
-            LogError("Error: astcenc_config_init failed in SCTParser::DecodeASTC()");
-            return std::vector<uint8_t>(width * height * 4, 128);
+        if (astcenc_config_init(
+                ASTCENC_PRF_LDR,
+                static_cast<unsigned int>(block_w),
+                static_cast<unsigned int>(block_h),
+                1,
+                ASTCENC_PRE_FASTEST,
+                0,
+                &config) != ASTCENC_SUCCESS)
+        {
+            LogError("SctParser: astcenc_config_init failed");
+            return nullptr;
         }
 
-
-        astcenc_context* context;
-        status = astcenc_context_alloc(&config, 1, &context);
-        if (status != ASTCENC_SUCCESS) {
-            LogError("Error: astcenc_context_alloc failed in SCTParser::DecodeASTC()");
-            return std::vector<uint8_t>(width * height * 4, 128);
-        }
-        std::vector<uint8_t> rgba(width * height * 4);
-
-        astcenc_image image{};
-        image.dim_x = width;
-        image.dim_y = height;
-        image.dim_z = 1;
-        image.data_type = ASTCENC_TYPE_U8;
-
-        void* data_ptr = rgba.data();
-        image.data = &data_ptr;
-
-
-        constexpr astcenc_swizzle swizzle = { ASTCENC_SWZ_B, ASTCENC_SWZ_G, ASTCENC_SWZ_R, ASTCENC_SWZ_A };
-
-
-        status = astcenc_decompress_image(
-            context,
-            compressed_data.data(),
-            compressed_data.size(),
-            &image,
-            &swizzle,
-            0
-        );
-
-        if (status != ASTCENC_SUCCESS) {
-            LogError("Error: astcenc_decompress_image failed (" + std::to_string(status) + ")");
-            std::fill(rgba.begin(), rgba.end(), 128);
+        astcenc_context* raw_ctx = nullptr;
+        if (astcenc_context_alloc(&config, 1, &raw_ctx) != ASTCENC_SUCCESS || !raw_ctx) {
+            LogError("SctParser: astcenc_context_alloc failed");
+            return nullptr;
         }
 
-        astcenc_context_free(context);
+        auto [it, _] = cache.emplace(key, AstcContext(raw_ctx));
+        return it->second.Get();
+    }
+
+    ContainerFormat DetectContainerFormat(std::span<const uint8_t> data) noexcept {
+        Core::BinaryReader reader(data);
+        if (const auto sig = reader.PeekAt<int32_t>(0); sig && *sig == kSct2Signature) {
+            return ContainerFormat::Sct2;
+        }
+        if (data.size() >= 3) {
+            if (const auto word = reader.PeekAt<uint16_t>(0); word && *word == kSctSignatureWord && data[2] == kSctSignatureByte) {
+                return ContainerFormat::Sct;
+            }
+        }
+        return ContainerFormat::Unknown;
+    }
+
+    SctHeader ParseSctHeader(std::span<const uint8_t> data) {
+        if (data.size() < 9) {
+            throw std::runtime_error("File too small to contain a valid SCT header");
+        }
+        Core::BinaryReader reader(data);
+        SctHeader header{};
+        reader.Skip(4);
+        header.pixel_format = reader.Read<uint8_t>();
+        header.width = reader.Read<uint16_t>();
+        header.height = reader.Read<uint16_t>();
+        header.texture_width = header.width;
+        header.texture_height = header.height;
+        header.data_offset = 9;
+        header.compressed = true;
+        return header;
+    }
+
+    SctHeader ParseSct2Header(std::span<const uint8_t> data) {
+        if (data.size() < 34) {
+            throw std::runtime_error("File too small to contain a valid SCT2 header");
+        }
+        Core::BinaryReader reader(data);
+        SctHeader header{};
+        reader.Skip(12); // signature(4) + total_size(4) + unk(4)
+        const int32_t offset = reader.Read<int32_t>();
+        if (offset < 0 || static_cast<size_t>(offset) > data.size()) {
+            throw std::runtime_error("Invalid SCT2 data offset");
+        }
+        header.data_offset = static_cast<size_t>(offset);
+        reader.Skip(4);
+        header.pixel_format = reader.Read<int32_t>();
+        header.width = reader.Read<uint16_t>();
+        header.height = reader.Read<uint16_t>();
+        header.texture_width = reader.Read<uint16_t>();
+        header.texture_height = reader.Read<uint16_t>();
+        header.flags = reader.Read<uint8_t>();
+
+        header.has_alpha = (header.flags & 0x01u) != 0;
+        header.raw_data = (header.flags & 0x10u) != 0;
+        header.compressed = (header.flags & 0x80u) != 0;
+        return header;
+    }
+
+    TextureFormat ClassifyTextureFormat(int format_code) noexcept {
+        switch (format_code) {
+            case 4:   return TextureFormat::Rgb565Le;
+            case 6:   return TextureFormat::Rgb;
+            case 16:  return TextureFormat::Rgb565Le;
+            case 19:  return TextureFormat::Etc2Rgba8;
+            case 40:  return TextureFormat::Astc4x4;
+            case 44:  return TextureFormat::Astc6x6;
+            case 47:  return TextureFormat::Astc8x8;
+            case 102: return TextureFormat::L8;
+            default:
+                if (format_code >= 17 && format_code <= 26) {
+                    return TextureFormat::RgbaRaw;
+                }
+                return TextureFormat::Unknown;
+        }
+    }
+
+    /**
+     * Attempts heuristic LZ4 decompression once and returns the decompressed payload
+     * directly if decompression makes sense, avoiding double decompression.
+     */
+    std::optional<std::vector<uint8_t>> TryHeuristicLz4Decompress(
+        std::span<const uint8_t> image_data,
+        int width,
+        int height,
+        int pixel_format)
+    {
+        if (image_data.size() < 8) return std::nullopt;
+
+        const double expected_size = (pixel_format == 40)
+            ? static_cast<double>(((width + 3) / 4) * ((height + 3) / 4) * 16)
+            : static_cast<double>(width * height * 2);
+
+        if (expected_size <= 0.0) return std::nullopt;
+
+        const double size_ratio = static_cast<double>(image_data.size()) / expected_size;
+        if (size_ratio >= 0.95) return std::nullopt;
+
+        auto decompressed = Core::TryDecompressLz4WithHeader(image_data, false);
+        if (!decompressed || decompressed->empty()) return std::nullopt;
+
+        const double decomp_ratio = static_cast<double>(decompressed->size()) / expected_size;
+        if (decomp_ratio > size_ratio) {
+            return decompressed;
+        }
+        return std::nullopt;
+    }
+
+    std::vector<uint8_t> DecodeRgb565LeToRgba(std::span<const uint8_t> data) {
+        const size_t pixel_count = data.size() / 2;
+        std::vector<uint8_t> rgba(pixel_count * 4);
+        Core::BinaryReader reader(data);
+        for (size_t i = 0; i < pixel_count; ++i) {
+            const uint16_t pixel = *reader.TryRead<uint16_t>();
+            rgba[i * 4 + 0] = static_cast<uint8_t>(((pixel >> 11) & 0x1Fu) << 3);
+            rgba[i * 4 + 1] = static_cast<uint8_t>(((pixel >> 5) & 0x3Fu) << 2);
+            rgba[i * 4 + 2] = static_cast<uint8_t>((pixel & 0x1Fu) << 3);
+            rgba[i * 4 + 3] = 255;
+        }
         return rgba;
     }
 
-    std::vector<uint8_t> DecodeETC2RGBA8(const std::vector<uint8_t>& compressed_data, const int width, const int height) {
-        constexpr int block_width = 4;
-        constexpr int block_height = 4;
-        constexpr int block_size = 16;
+    std::vector<uint8_t> DecodeL8ToRgba(std::span<const uint8_t> data) {
+        std::vector<uint8_t> rgba(data.size() * 4);
+        for (size_t i = 0; i < data.size(); ++i) {
+            const uint8_t gray = data[i];
+            rgba[i * 4 + 0] = gray;
+            rgba[i * 4 + 1] = gray;
+            rgba[i * 4 + 2] = gray;
+            rgba[i * 4 + 3] = 255;
+        }
+        return rgba;
+    }
 
-
-        const int num_blocks_x = (width + block_width - 1) / block_width;
-        const int num_blocks_y = (height + block_height - 1) / block_height;
-
-
-        if (const size_t expected_size = num_blocks_x * num_blocks_y * block_size; compressed_data.size() < expected_size) {
-            return std::vector<uint8_t>(width * height * 4, 128);
+    std::vector<uint8_t> DecodeAstc(
+        std::span<const uint8_t> compressed_data,
+        int width,
+        int height,
+        int block_w,
+        int block_h)
+    {
+        if (width <= 0 || height <= 0 || width > kMaxTextureDim || height > kMaxTextureDim) {
+            LogError("ASTC decode: invalid dimensions");
+            return {};
         }
 
+        const int blocks_x = (width + block_w - 1) / block_w;
+        const int blocks_y = (height + block_h - 1) / block_h;
+        const size_t expected_size = static_cast<size_t>(blocks_x) * static_cast<size_t>(blocks_y) * 16;
+        if (compressed_data.size() < expected_size) {
+            LogError(std::format("ASTC data too small: expected {}, got {}", expected_size, compressed_data.size()));
+            return {};
+        }
 
-        std::vector<uint8_t> rgba(width * height * 4);
+        astcenc_context* ctx = GetCachedAstcContext(block_w, block_h);
+        if (!ctx) {
+            return std::vector<uint8_t>(static_cast<size_t>(width) * height * 4, 128);
+        }
 
-        uint8_t block_pixels[block_width * block_height * 4];
+        std::vector<uint8_t> rgba(static_cast<size_t>(width) * height * 4);
+        void* data_ptr = rgba.data();
 
+        astcenc_image image{};
+        image.dim_x = static_cast<unsigned int>(width);
+        image.dim_y = static_cast<unsigned int>(height);
+        image.dim_z = 1;
+        image.data_type = ASTCENC_TYPE_U8;
+        image.data = &data_ptr;
+
+        // Decode directly into RGBA order (avoids redundant BGRA->RGBA swap pass).
+        constexpr astcenc_swizzle kRgbaSwizzle = {
+            ASTCENC_SWZ_R, ASTCENC_SWZ_G, ASTCENC_SWZ_B, ASTCENC_SWZ_A
+        };
+
+        const astcenc_error status = astcenc_decompress_image(
+            ctx, compressed_data.data(), compressed_data.size(), &image, &kRgbaSwizzle, 0);
+
+        if (status != ASTCENC_SUCCESS) {
+            LogError(std::format("astcenc_decompress_image failed ({})", static_cast<int>(status)));
+            std::ranges::fill(rgba, uint8_t{128});
+        }
+
+        return rgba;
+    }
+
+    std::vector<uint8_t> DecodeEtc2Rgba8(std::span<const uint8_t> compressed_data, int width, int height) {
+        constexpr int kBlockW = 4;
+        constexpr int kBlockH = 4;
+        constexpr int kBlockBytes = 16;
+
+        const int num_blocks_x = (width + kBlockW - 1) / kBlockW;
+        const int num_blocks_y = (height + kBlockH - 1) / kBlockH;
+        const size_t expected_size = static_cast<size_t>(num_blocks_x) * num_blocks_y * kBlockBytes;
+
+        if (compressed_data.size() < expected_size) {
+            return std::vector<uint8_t>(static_cast<size_t>(width) * height * 4, 128);
+        }
+
+        std::vector<uint8_t> rgba(static_cast<size_t>(width) * height * 4);
+        std::array<uint8_t, kBlockW * kBlockH * 4> block_pixels{};
         const uint8_t* src_ptr = compressed_data.data();
 
         for (int by = 0; by < num_blocks_y; ++by) {
             for (int bx = 0; bx < num_blocks_x; ++bx) {
+                etcdec_eac_rgba(src_ptr, block_pixels.data(), kBlockBytes);
+                src_ptr += kBlockBytes;
 
-                etcdec_eac_rgba(src_ptr, block_pixels, 16);
-
-
-                src_ptr += block_size;
-
-
-                for (int y = 0; y < block_height; ++y) {
-                    for (int x = 0; x < block_width; ++x) {
-
-                        const int final_x = bx * block_width + x;
-
-
-                        if (const int final_y = by * block_height + y; final_x < width && final_y < height) {
-                            const size_t block_idx = (y * block_width + x) * 4;
-                            const size_t final_idx = (final_y * width + final_x) * 4;
-
-                            rgba[final_idx + 0] = block_pixels[block_idx + 0];
-                            rgba[final_idx + 1] = block_pixels[block_idx + 1];
-                            rgba[final_idx + 2] = block_pixels[block_idx + 2];
-                            rgba[final_idx + 3] = block_pixels[block_idx + 3];
-                        }
+                for (int y = 0; y < kBlockH; ++y) {
+                    const int final_y = by * kBlockH + y;
+                    if (final_y >= height) continue;
+                    for (int x = 0; x < kBlockW; ++x) {
+                        const int final_x = bx * kBlockW + x;
+                        if (final_x >= width) continue;
+                        const size_t block_idx = static_cast<size_t>((y * kBlockW + x) * 4);
+                        const size_t final_idx = static_cast<size_t>((final_y * width + final_x) * 4);
+                        std::copy_n(block_pixels.data() + block_idx, 4, rgba.data() + final_idx);
                     }
                 }
             }
         }
-
         return rgba;
     }
-}
 
-SctParser::RgbaImage SctParser::ConvertToRgba(const std::vector<uint8_t>& data) {
+} // namespace
+
+SctParser::RgbaImage SctParser::ConvertToRgba(std::span<const uint8_t> data) {
     try {
-        Format format_type = DetectFormat(data);
-        Header header;
-        std::vector<uint8_t> image_data;
-        PixelFormatInfo format_info;
+        const ContainerFormat container = DetectContainerFormat(data);
+        if (container == ContainerFormat::Unknown) return {};
 
-        if (format_type == Format::SCT2) {
-            header = ParseSCT2Header(data);
-            size_t image_data_start = header.data_offset;
-            image_data.assign(data.begin() + image_data_start, data.end());
+        SctHeader header{};
+        std::vector<uint8_t> decompressed_storage;
+        std::span<const uint8_t> payload;
+
+        if (container == ContainerFormat::Sct2) {
+            header = ParseSct2Header(data);
+            payload = data.subspan(header.data_offset);
 
             if (header.raw_data || header.has_alpha) {
-                if (ShouldDecompress(image_data, header.width, header.height, header.pixel_format)) {
-                    try {
-                        image_data = LZ4Decompress(image_data);
-                    }
-                    catch (...) {}
+                if (auto decomp = TryHeuristicLz4Decompress(payload, header.width, header.height, header.pixel_format)) {
+                    decompressed_storage = std::move(*decomp);
+                    payload = decompressed_storage;
                 }
+            } else if (header.pixel_format == 40 || header.compressed) {
+                decompressed_storage = Core::DecompressLz4WithHeader(payload, false);
+                payload = decompressed_storage;
             }
-            else if (header.pixel_format == 40 || header.compressed) {
-                try {
-                    image_data = LZ4Decompress(image_data);
-                }
-                catch (...) {
-                    throw;
-                }
-            }
-
-            format_info = GetPixelFormatInfo(header.pixel_format);
+        } else {
+            header = ParseSctHeader(data);
+            payload = data.subspan(header.data_offset);
+            decompressed_storage = Core::DecompressLz4WithHeader(payload, false);
+            payload = decompressed_storage;
         }
-        else if (format_type == Format::SCT) {
-            header = ParseSCTHeader(data);
-            size_t image_data_start = header.data_offset;
-            image_data.assign(data.begin() + image_data_start, data.end());
 
-            try {
-                image_data = LZ4Decompress(image_data);
-            }
-            catch (...) {
-                throw;
-            }
-
-            format_info = GetPixelFormatInfo(header.pixel_format);
-        }
-        else {
+        const int width = header.width;
+        const int height = header.height;
+        if (width <= 0 || height <= 0 || width > kMaxTextureDim || height > kMaxTextureDim) {
+            LogError("SctParser::ConvertToRgba: invalid dimensions");
             return {};
         }
 
-        int width = header.width;
-        int height = header.height;
-        if (width <= 0 || height <= 0 || width > 16384 || height > 16384) {
-            LogError("SCT ConvertToRGBA: invalid dimensions");
-            return {};
-        }
-        std::vector<uint8_t> final_rgba_data;
-
-        if(format_info.type == "L8")
-        {
-            final_rgba_data = L8ToRGBA(image_data);
-        }
-        else if (format_info.type == "RGB565_LE") {
-            auto rgb_data = RGB565LEToRGB(image_data);
-            final_rgba_data = RGBToRGBA(rgb_data);
-        }
-        else if (format_info.type == "ETC2_RGBA8") {
-            final_rgba_data = DecodeETC2RGBA8(image_data, width, height);
-        }
-        else if (format_info.type == "ASTC_4x4") {
-            final_rgba_data = DecodeASTC(image_data, width, height, 4, 4);
-            if (final_rgba_data.empty()) { LogError("ASTC 4x4 decode failed"); return {}; }
-            BGRASwapRB(final_rgba_data);
-        }
-        else if(format_info.type == "ASTC_6x6") {
-            final_rgba_data = DecodeASTC(image_data, width, height, 6, 6);
-            if(final_rgba_data.empty()) { LogError("ASTC 6x6 decode failed"); return {};}
-            BGRASwapRB(final_rgba_data);
-        }
-        else if (format_info.type == "ASTC_8x8") {
-            final_rgba_data = DecodeASTC(image_data, width, height, 8, 8);
-            if (final_rgba_data.empty()) { LogError("ASTC 8x8 decode failed"); return {}; }
-            BGRASwapRB(final_rgba_data);
-        }
-        else {
-            final_rgba_data = image_data;
+        std::vector<uint8_t> rgba;
+        switch (ClassifyTextureFormat(header.pixel_format)) {
+            case TextureFormat::L8:
+                rgba = DecodeL8ToRgba(payload);
+                break;
+            case TextureFormat::Rgb565Le:
+                rgba = DecodeRgb565LeToRgba(payload);
+                break;
+            case TextureFormat::Etc2Rgba8:
+                rgba = DecodeEtc2Rgba8(payload, width, height);
+                break;
+            case TextureFormat::Astc4x4:
+                rgba = DecodeAstc(payload, width, height, 4, 4);
+                break;
+            case TextureFormat::Astc6x6:
+                rgba = DecodeAstc(payload, width, height, 6, 6);
+                break;
+            case TextureFormat::Astc8x8:
+                rgba = DecodeAstc(payload, width, height, 8, 8);
+                break;
+            default:
+                rgba.assign(payload.begin(), payload.end());
+                break;
         }
 
-        if (final_rgba_data.empty() || final_rgba_data.size() < static_cast<size_t>(width) * height * 4) {
-            LogError("SCT ConvertToRGBA: RGBA buffer invalid size");
+        if (rgba.size() < static_cast<size_t>(width) * height * 4) {
+            LogError("SctParser::ConvertToRgba: RGBA buffer invalid size");
             return {};
         }
 
-        RgbaImage result;
-        result.data = std::move(final_rgba_data);
-        result.width = width;
-        result.height = height;
-        return result;
-    }
-    catch (const std::exception& e) {
-        LogError(std::string("SCT ConvertToRgba exception: ") + e.what());
+        return RgbaImage{std::move(rgba), width, height};
+    } catch (const std::exception& e) {
+        LogError(std::string("SctParser::ConvertToRgba exception: ") + e.what());
         return {};
     }
 }
 
-std::vector<uint8_t> SctParser::ConvertToPng(const std::vector<uint8_t>& data) {
+std::vector<uint8_t> SctParser::ConvertToPng(std::span<const uint8_t> data) {
     auto [image, width, height] = ConvertToRgba(data);
     if (image.empty()) return {};
 
     std::vector<uint8_t> png_data;
     auto write_func = [](void* context, void* buf, const int size) {
         auto* vec = static_cast<std::vector<uint8_t>*>(context);
-        auto* bytes = static_cast<uint8_t*>(buf);
+        const auto* bytes = static_cast<const uint8_t*>(buf);
         vec->insert(vec->end(), bytes, bytes + size);
     };
 
-    if (const int result = stbi_write_png_to_func(write_func, &png_data, width, height, 4, image.data(),width * 4); result == 0) {
-        LogError("SCT ConvertToPNG: PNG encoding failed");
+    if (stbi_write_png_to_func(write_func, &png_data, width, height, 4, image.data(), width * 4) == 0) {
+        LogError("SctParser::ConvertToPng: PNG encoding failed");
         return {};
     }
     return png_data;

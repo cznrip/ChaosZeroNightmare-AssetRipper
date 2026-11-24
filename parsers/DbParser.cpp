@@ -1,271 +1,195 @@
-#include "DbParser.hpp"
-#include <vector>
-#include <string>
-#include <sstream>
-#include <iomanip>
-#include <map>
+#include "parsers/DbParser.hpp"
+#include "core/BinaryReader.hpp"
+#include "core/Crypto.hpp"
 #include "core/Logger.hpp"
-#include "json.hpp"
 
-using json = nlohmann::json;
+#include <array>
+#include <string_view>
+#include <unordered_map>
+#include <vector>
 
-namespace
-{
-    struct Header
-    {
-        std::vector<uint8_t> magic; // 5 bytes
-        uint8_t version{};
-        uint16_t headerSize{};
-        uint8_t unk{};
-        uint64_t unk1{};
-        uint32_t defaultFileCount{};
-        uint32_t hashTableCount{};
-        uint64_t hashTableOffset{}; // UInt40
-        uint64_t unk5{};
+namespace {
+
+    constexpr std::string_view kDbMagic = "PLPcK";
+    constexpr uint16_t kExpectedHeaderSize = 0x26;
+
+    struct DbHeader {
+        uint8_t version = 0;
+        uint16_t header_size = 0;
+        uint32_t default_file_count = 0;
+        uint32_t hash_table_count = 0;
+        uint64_t hash_table_offset = 0;
     };
 
-    struct HashTableEntry
-    {
-        uint64_t entryOffset; // UInt40
-    };
+    std::vector<uint8_t> DecryptDb(std::span<const uint8_t> data) {
+        if (data.size() < kDbMagic.size()) return {};
 
-    struct FileChunkHeader
-    {
-        uint32_t entrySize;
-        uint8_t entryType;
-        uint8_t fileNameLength;
-        uint32_t fileSize;
-        uint64_t nextEntry; // UInt40
-    };
-
-    constexpr auto KEY_HEX = "91AE4ED4644F585162EC1BD5EF24ADDBAF838242AEF51E97804B134FFD8CE5BB4F6E3E6451147CDF56C318E5E964C999C0D95CC860822E6B418BE465D79A036DBF67AB3DA72AB1023A4561F444E5CE858D23EA10FEB4899151AD7E43FF3E2419A97B4DD3AF4EF5C829E5AF4ACE9436F6B6B6382E9DFD26642099011A4899089C9D4B9F80BBB00A4CC73255CE1F78646E91C9C12313F5D840DC51457010D37D19615BB69888B42B19E749F993C00337E9332F89B320C173A5653848788798A771739E72DBC84C7946597149BDDAE4E3BD1A17856C85A555CFA24F6352D005933B50042BE0BA4C708DE8EBB52059B2059C9BFE90D8923DF74B43911BBC00BB6BFA";
-
-    std::vector<uint8_t> DecryptDB(const std::vector<uint8_t> &data)
-    {
-        std::vector<uint8_t> key;
-        key.reserve(256);
-        for (size_t i = 0; i < 256; ++i)
-        {
-            std::string byteStr(KEY_HEX + i * 2, 2);
-            key.push_back(static_cast<uint8_t>(std::stoi(byteStr, nullptr, 16)));
-        }
-
-        for (int i = 0; i < 256; ++i)
-        {
-            std::vector cur_k(key.begin() + i, key.end());
-            cur_k.insert(cur_k.end(), key.begin(), key.begin() + i);
-            bool found = true;
-            for (size_t j = 0; j < 5; ++j)
-            {
-                if ((data[j] ^ cur_k[j % cur_k.size()]) != static_cast<uint8_t>("PLPcK"[j]))
-                {
-                    found = false;
+        const auto& key = Core::kDatabaseXorKey;
+        for (size_t rot = 0; rot < key.size(); ++rot) {
+            bool match = true;
+            for (size_t j = 0; j < kDbMagic.size(); ++j) {
+                if ((data[j] ^ key[(rot + j) & 0xFFu]) != static_cast<uint8_t>(kDbMagic[j])) {
+                    match = false;
                     break;
                 }
             }
-            if (found)
-            {
-                std::vector<uint8_t> result(data.size());
-                for (size_t j = 0; j < data.size(); ++j)
-                {
-                    result[j] = data[j] ^ cur_k[j % cur_k.size()];
+            if (match) {
+                std::vector<uint8_t> decrypted(data.size());
+                for (size_t j = 0; j < data.size(); ++j) {
+                    decrypted[j] = data[j] ^ key[(rot + j) & 0xFFu];
                 }
-                return result;
+                return decrypted;
             }
         }
         return {};
     }
-}
 
-std::string DbParser::ConvertToJson(const std::vector<uint8_t> &data)
-{
+    bool ParseHeader(Core::BinaryReader& reader, DbHeader& out) noexcept {
+        if (!reader.HasBytes(kExpectedHeaderSize) || !reader.MatchMagic(kDbMagic)) {
+            return false;
+        }
+        out.version = *reader.TryRead<uint8_t>();
+        out.header_size = *reader.TryRead<uint16_t>();
+        if (out.header_size != kExpectedHeaderSize) {
+            return false;
+        }
+        reader.Skip(1 + 8); // unk + unk1
+        out.default_file_count = *reader.TryRead<uint32_t>();
+        out.hash_table_count = *reader.TryRead<uint32_t>();
+        const auto ht_offset = reader.TryReadUInt40HiLo();
+        if (!ht_offset) return false;
+        out.hash_table_offset = *ht_offset;
+        reader.Skip(8); // unk5
+        return true;
+    }
+
+    std::string_view SpanAsStringView(std::span<const uint8_t> s) noexcept {
+        return {reinterpret_cast<const char*>(s.data()), s.size()};
+    }
+
+} // namespace
+
+nlohmann::ordered_json DbParser::ParseToJson(std::span<const uint8_t> data) {
     try {
-        std::vector<uint8_t> decrypted = DecryptDB(data);
-        std::stringstream ss;
-        size_t pos = 0;
-        std::map<std::string, std::vector<uint8_t>> entries;
-        Header header;
+        const std::vector<uint8_t> decrypted = DecryptDb(data);
+        if (decrypted.size() < kExpectedHeaderSize) {
+            return nlohmann::ordered_json::object();
+        }
 
-        // Read header
-        if (decrypted.size() < 0x26)
-            return "{}"; // Minimum header size
+        Core::BinaryReader reader(decrypted);
+        DbHeader header{};
+        if (!ParseHeader(reader, header)) {
+            return nlohmann::ordered_json::object();
+        }
 
-        // Magic (5 bytes)
-        header.magic.assign(decrypted.begin() + pos, decrypted.begin() + pos + 5);
-        pos += 5;
+        if (!reader.Seek(static_cast<size_t>(header.hash_table_offset)) || !reader.HasBytes(5)) {
+            return nlohmann::ordered_json::object();
+        }
 
-        // Version (u8)
-        header.version = decrypted[pos++];
+        const uint32_t root_size = *reader.TryRead<uint32_t>();
+        const uint8_t root_tag = *reader.TryRead<uint8_t>();
+        if (root_tag != 1 || root_size != 5u * (header.hash_table_count + 1u)) {
+            return nlohmann::ordered_json::object();
+        }
 
-        // Header size (u16)
-        header.headerSize = *reinterpret_cast<const uint16_t *>(&decrypted[pos]);
-        pos += 2;
+        // Zero-copy map from entry name -> byte slice inside decrypted buffer
+        std::unordered_map<std::string_view, std::span<const uint8_t>> entries;
+        entries.reserve(header.default_file_count + 16);
 
-        if (header.headerSize != 0x26)
-            return "{}";
+        for (uint32_t i = 0; i < header.hash_table_count; ++i) {
+            const auto entry_offset_opt = reader.TryReadUInt40HiLo();
+            if (!entry_offset_opt) break;
+            if (*entry_offset_opt == 0) continue;
 
-        // unk (u8)
-        header.unk = decrypted[pos++];
+            uint64_t current_pos = *entry_offset_opt;
+            size_t chain_guard = 0;
+            constexpr size_t kMaxChainSteps = 100000;
 
-        // unk1 (u64)
-        header.unk1 = *reinterpret_cast<const uint64_t *>(&decrypted[pos]);
-        pos += 8;
+            while (current_pos != 0 && current_pos < decrypted.size() && ++chain_guard <= kMaxChainSteps) {
+                Core::BinaryReader chunk_reader(decrypted, static_cast<size_t>(current_pos));
+                if (!chunk_reader.HasBytes(15)) break;
 
-        // default_file_count (u32)
-        header.defaultFileCount = *reinterpret_cast<const uint32_t *>(&decrypted[pos]);
-        pos += 4;
+                chunk_reader.Skip(4); // entry_size
+                chunk_reader.Skip(1); // entry_type
+                const uint8_t name_len = *chunk_reader.TryRead<uint8_t>();
+                const uint32_t file_size = *chunk_reader.TryRead<uint32_t>();
+                const auto next_entry = chunk_reader.TryReadUInt40HiLo();
+                if (!next_entry) break;
 
-        // hash_table_count (u32)
-        header.hashTableCount = *reinterpret_cast<const uint32_t *>(&decrypted[pos]);
-        pos += 4;
+                const auto name_bytes = chunk_reader.TryReadBytes(name_len);
+                const auto file_bytes = chunk_reader.TryReadBytes(file_size);
+                if (!name_bytes || !file_bytes) break;
 
-        // hash_table_offset (UInt40)
-        uint8_t offsetHi = decrypted[pos++];
-        uint32_t offsetLo = *reinterpret_cast<const uint32_t *>(&decrypted[pos]);
-        pos += 4;
-        header.hashTableOffset = offsetLo + (static_cast<uint64_t>(offsetHi) << 32);
-
-        // unk5 (u64)
-        header.unk5 = *reinterpret_cast<const uint64_t *>(&decrypted[pos]);
-        pos += 8;
-
-        // go to hash table offset
-        pos = header.hashTableOffset;
-
-        // Root entry (5 bytes)
-        std::vector<uint8_t> rootEntry(decrypted.begin() + pos, decrypted.begin() + pos + 5);
-        pos += 5;
-
-        if (rootEntry[4] != 1)
-            return "{}";
-        if (uint32_t rootSize = *reinterpret_cast<const uint32_t *>(&rootEntry[0]); rootSize != 5 * (header.hashTableCount + 1))
-            return "{}";
-
-        // Hash table entries
-        std::vector<HashTableEntry> hashTableEntries;
-        // Process each entry in the hash table
-        for (uint32_t i = 0; i < header.hashTableCount; i++)
-        {
-            uint8_t entryHi = decrypted[pos++];
-            uint32_t entryLo = *reinterpret_cast<const uint32_t *>(&decrypted[pos]);
-            pos += 4;
-            HashTableEntry entry{};
-            entry.entryOffset = entryLo + (static_cast<uint64_t>(entryHi) << 32);
-            hashTableEntries.push_back(entry);
-
-            if (entry.entryOffset != 0)
-            {
-                size_t currentPos = entry.entryOffset;
-
-                while (true)
-                {
-                    // Read FileChunkHeader
-                    FileChunkHeader chunk{};
-                    chunk.entrySize = *reinterpret_cast<const uint32_t *>(&decrypted[currentPos]);
-                    currentPos += 4;
-
-                    chunk.entryType = decrypted[currentPos++];
-                    chunk.fileNameLength = decrypted[currentPos++];
-
-                    chunk.fileSize = *reinterpret_cast<const uint32_t *>(&decrypted[currentPos]);
-                    currentPos += 4;
-
-                    uint8_t nextEntryHi = decrypted[currentPos++];
-                    uint32_t nextEntryLo = *reinterpret_cast<const uint32_t *>(&decrypted[currentPos]);
-                    currentPos += 4;
-                    chunk.nextEntry = nextEntryLo + (static_cast<uint64_t>(nextEntryHi) << 32);
-
-                    // Read file name
-                    std::string fileName(reinterpret_cast<const char *>(&decrypted[currentPos]), chunk.fileNameLength);
-                    currentPos += chunk.fileNameLength;
-
-                    // Read file data
-                    std::vector<uint8_t> fileData(decrypted.begin() + currentPos,
-                                                  decrypted.begin() + currentPos + chunk.fileSize);
-                    currentPos += chunk.fileSize;
-
-                    // Save entry
-                    entries[fileName] = fileData;
-
-                    if (chunk.nextEntry == 0)
-                        break;
-                    currentPos = chunk.nextEntry;
-                }
+                entries.emplace(SpanAsStringView(*name_bytes), *file_bytes);
+                current_pos = *next_entry;
             }
         }
 
-        // Process the database data
         uint32_t rows = 0;
         uint32_t cols = 0;
-        std::vector<std::string> colNames;
-
-        // Get rows and cols
-        auto rowsIt = entries.find("\trows");
-        if (rowsIt != entries.end() && !rowsIt->second.empty())
-        {
-            rows = *reinterpret_cast<const uint32_t *>(rowsIt->second.data());
+        if (const auto it = entries.find("\trows"); it != entries.end() && it->second.size() >= sizeof(uint32_t)) {
+            Core::BinaryReader r(it->second);
+            rows = *r.TryRead<uint32_t>();
+        }
+        if (const auto it = entries.find("\tcols"); it != entries.end() && it->second.size() >= sizeof(uint32_t)) {
+            Core::BinaryReader r(it->second);
+            cols = *r.TryRead<uint32_t>();
         }
 
-        auto colsIt = entries.find("\tcols");
-        if (colsIt != entries.end() && !colsIt->second.empty())
-        {
-            cols = *reinterpret_cast<const uint32_t *>(colsIt->second.data());
-        }
-
-        // Get column names
-        for (uint32_t col = 0; col < cols; col++)
-        {
-            std::string key = "\t" + std::to_string(col);
-            auto it = entries.find(key);
-            if (it != entries.end())
-            {
-                colNames.emplace_back(it->second.begin(), it->second.end());
+        std::vector<std::string> col_names;
+        col_names.reserve(cols);
+        for (uint32_t col = 0; col < cols; ++col) {
+            const std::string key = "\t" + std::to_string(col);
+            if (const auto it = entries.find(key); it != entries.end()) {
+                col_names.emplace_back(SpanAsStringView(it->second));
             }
         }
 
-        // Build final JSON
-        json root_json = json::array();
+        nlohmann::ordered_json root_json = nlohmann::ordered_json::array();
+        std::vector<std::string_view> values;
+        values.reserve(col_names.size());
 
-        for (uint32_t row = 0; row < rows; row++)
-        {
-            std::string entryKey = "\t\t" + std::to_string(row);
-            auto entryIt = entries.find(entryKey);
+        for (uint32_t row = 0; row < rows; ++row) {
+            const std::string entry_key = "\t\t" + std::to_string(row);
+            const auto entry_it = entries.find(entry_key);
+            if (entry_it == entries.end()) continue;
 
-            if (entryIt != entries.end())
-            {
-                auto actualEntryIt = entries.find(std::string(entryIt->second.begin(), entryIt->second.end()));
-                if (actualEntryIt != entries.end())
-                {
-                    // Split data by column
-                    std::vector<std::string> values;
-                    size_t start = 0;
-                    for (size_t i = 0; i < actualEntryIt->second.size(); i++)
-                    {
-                        if (actualEntryIt->second[i] == 0)
-                        {
-                            values.emplace_back(
-                                actualEntryIt->second.begin() + start,
-                                actualEntryIt->second.begin() + i);
-                            start = i + 1;
-                        }
-                    }
+            const auto actual_it = entries.find(SpanAsStringView(entry_it->second));
+            if (actual_it == entries.end()) continue;
 
-                    // Generate JSON for the row
-                    json row_obj = json::object();
-                    for (size_t i = 0; i < colNames.size() && i < values.size(); i++)
-                    {
-                        row_obj[colNames[i]] = values[i];
-                    }
-                    root_json.push_back(row_obj);
+            values.clear();
+            const auto row_bytes = actual_it->second;
+            size_t start = 0;
+            for (size_t i = 0; i < row_bytes.size(); ++i) {
+                if (row_bytes[i] == 0) {
+                    values.push_back(SpanAsStringView(row_bytes.subspan(start, i - start)));
+                    start = i + 1;
                 }
             }
+
+            nlohmann::ordered_json row_obj = nlohmann::ordered_json::object();
+            const size_t count = (std::min)(col_names.size(), values.size());
+            for (size_t i = 0; i < count; ++i) {
+                row_obj[col_names[i]] = values[i];
+            }
+            root_json.push_back(std::move(row_obj));
         }
 
-        return root_json.dump(2, ' ', false);
-
-    } catch (const std::exception&) {
-        return "{}";
+        return root_json;
+    } catch (const std::exception& e) {
+        LogError(std::string("DbParser::ParseToJson exception: ") + e.what());
+        return nlohmann::ordered_json::object();
     } catch (...) {
+        LogError("DbParser::ParseToJson unknown exception");
+        return nlohmann::ordered_json::object();
+    }
+}
+
+std::string DbParser::ConvertToJson(std::span<const uint8_t> data) {
+    try {
+        return ParseToJson(data).dump(2, ' ', false);
+    } catch (const std::exception& e) {
+        LogError(std::string("DbParser::ConvertToJson dump exception: ") + e.what());
         return "{}";
     }
 }

@@ -21,8 +21,7 @@ namespace {
             std::string_view filename) const override
         {
             LogInfo(std::string("Converting SCT to PNG: ") + std::string(filename));
-            std::vector<uint8_t> input(raw_data.begin(), raw_data.end());
-            auto png = SctParser::ConvertToPng(input);
+            auto png = SctParser::ConvertToPng(raw_data);
             if (png.empty()) return std::nullopt;
             return png;
         }
@@ -64,8 +63,7 @@ namespace {
             std::string_view filename) const override
         {
             LogInfo(std::string("Converting DB to JSON: ") + std::string(filename));
-            std::vector<uint8_t> input(raw_data.begin(), raw_data.end());
-            const std::string json_str = DbParser::ConvertToJson(input);
+            const std::string json_str = DbParser::ConvertToJson(raw_data);
             if (json_str.empty() || json_str == "{}") return std::nullopt;
             return std::vector<uint8_t>(json_str.begin(), json_str.end());
         }
