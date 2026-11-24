@@ -31,16 +31,16 @@ namespace {
         Sct2
     };
 
-    enum class TextureFormat {
-        Unknown,
-        L8,
-        Rgb565Le,
-        Rgb,
-        Etc2Rgba8,
-        Astc4x4,
-        Astc6x6,
-        Astc8x8,
-        RgbaRaw
+    enum class TextureFormat : int32_t {
+        Unknown = 0,
+        Rgb565Le = 4,
+        Rgb = 6,
+        Rgb565 = 16,
+        Etc2Rgba8 = 19,
+        Astc4x4 = 40,
+        Astc6x6 = 44,
+        Astc8x8 = 47,
+        L8 = 102
     };
 
     struct SctHeader {
