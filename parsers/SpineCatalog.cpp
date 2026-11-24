@@ -23,9 +23,9 @@ void SpineCatalog::CollectFiles(const Core::FileNode& node) {
         const std::string ext = Core::GetExtensionLower(node.name);
         m_all_files[path] = &node;
 
-        if (ext == ".scsp") {
+        if (Core::IsScspExtension(ext)) {
             m_scsp_files[path] = &node;
-        } else if (ext == ".atlas") {
+        } else if (Core::IsAtlasExtension(ext)) {
             m_atlas_files[path] = &node;
         }
         return;
@@ -63,8 +63,8 @@ void SpineCatalog::MatchEntries() {
     size_t skipped_no_atlas = 0;
 
     std::unordered_map<std::string, std::vector<const Core::FileNode*>> atlases_by_dir;
-    for (const auto& [apath, anode] : m_atlas_files) {
-        atlases_by_dir[Core::GetDirectory(apath)].push_back(anode);
+    for (const auto& [path, node] : m_atlas_files) {
+        atlases_by_dir[Core::GetDirectory(path)].push_back(node);
     }
 
     m_entries.reserve(m_scsp_files.size());
@@ -146,7 +146,7 @@ void SpineCatalog::EnsureDetailsLoaded(IArchive& archive, const SpineEntry& entr
 
 size_t SpineCatalog::ComputeCategoryCounts(SpineCategory& category) noexcept {
     size_t total = category.entry_indices.size();
-    for (auto& [_, sub] : category.subcategories) {
+    for (auto &sub: category.subcategories | std::views::values) {
         total += ComputeCategoryCounts(sub);
     }
     category.total_entries = total;
@@ -183,7 +183,7 @@ void SpineCatalog::BuildCategories() {
     ComputeCategoryCounts(m_root_category);
 }
 
-void SpineCatalog::Build(IArchive& archive, const Core::FileNode& root) {
+void SpineCatalog::Build(const IArchive& archive, const Core::FileNode& root) {
     (void)archive;
     Clear();
     LogInfo("SpineCatalog: scanning file tree...");

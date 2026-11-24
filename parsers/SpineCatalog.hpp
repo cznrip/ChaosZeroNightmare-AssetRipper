@@ -31,13 +31,9 @@ struct SpineCategory {
     size_t total_entries = 0; // precomputed recursive count
 };
 
-/**
- * Indexes .scsp skeletons paired with their .atlas files and organizes them
- * into a hierarchical category tree with lazy detail loading.
- */
 class SpineCatalog {
 public:
-    void Build(IArchive& archive, const Core::FileNode& root);
+    void Build(const IArchive& archive, const Core::FileNode& root);
     void Clear();
     void EnsureDetailsLoaded(IArchive& archive, const SpineEntry& entry) const;
 
