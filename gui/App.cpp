@@ -11,6 +11,7 @@
 #include <fstream>
 #include <SDL_image.h>
 
+#include "core/AppInfo.hpp"
 #include "core/Core.hpp"
 #include "core/FileTree.hpp"
 #include "core/RipperOptions.hpp"
@@ -20,7 +21,7 @@
 #include "gui/FileBrowserPanel.hpp"
 #include "gui/SpinePanel.hpp"
 #include "gui/Toolbar.hpp"
-#include "parsers/SpineDictionary.h"
+#include "parsers/SpineCatalog.hpp"
 #include "parsers/SpineRenderer.hpp"
 
 // nuklear implementations
@@ -49,7 +50,7 @@ void App::InitSDL() {
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
-    m_win = SDL_CreateWindow("Chaos Zero Nightmare ASSet Ripper v1.5.0",
+    m_win = SDL_CreateWindow(AppInfo::WindowTitle,
                                        SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
                                        INITIAL_WINDOW_WIDTH, INITIAL_WINDOW_HEIGHT,
                                        SDL_WINDOW_OPENGL | SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_MAXIMIZED);
@@ -165,7 +166,7 @@ void App::ProcessEvents() {
         else if (evt.type == SDL_KEYDOWN)
         {
             // Spine viewer gets priority for arrow keys when open
-            if (g_state.spine.show_window && g_state.spine.dictionary.IsBuilt() && !g_state.spine.visible_indices.empty())
+            if (g_state.spine.show_window && g_state.spine.catalog.IsBuilt() && !g_state.spine.visible_indices.empty())
             {
                 if (evt.key.keysym.sym == SDLK_UP || evt.key.keysym.sym == SDLK_DOWN)
                 {
@@ -189,11 +190,11 @@ void App::ProcessEvents() {
                     {
                         g_state.spine.selected_index = new_idx;
                         // Load skeleton on arrow key selection
-                        if (const auto &entries = g_state.spine.dictionary.GetEntries(); g_state.spine.selected_index >= 0 && g_state.spine.selected_index < (int)entries.size())
+                        if (const auto &entries = g_state.spine.catalog.GetEntries(); g_state.spine.selected_index >= 0 && g_state.spine.selected_index < (int)entries.size())
                         {
                             if (!g_state.spine.viewer)
                                 g_state.spine.viewer = std::make_unique<SpineViewer>();
-                            g_state.spine.viewer->loadSkeleton(g_state.spine.dictionary, *g_state.browser.data_pack, entries[g_state.spine.selected_index]);
+                            g_state.spine.viewer->loadSkeleton(g_state.spine.catalog, *g_state.browser.data_pack, entries[g_state.spine.selected_index]);
                             g_state.spine.viewer->setFlipX(g_state.spine.flip_x);
                             g_state.spine.viewer->setFlipY(g_state.spine.flip_y);
                             g_state.spine.selected_animation = 0;
@@ -205,11 +206,11 @@ void App::ProcessEvents() {
                 }
                 else if (evt.key.keysym.sym == SDLK_RETURN && g_state.spine.selected_index >= 0)
                 {
-                    if (const auto &entries = g_state.spine.dictionary.GetEntries(); g_state.spine.selected_index < static_cast<int>(entries.size()))
+                    if (const auto &entries = g_state.spine.catalog.GetEntries(); g_state.spine.selected_index < static_cast<int>(entries.size()))
                     {
                         if (!g_state.spine.viewer)
                             g_state.spine.viewer = std::make_unique<SpineViewer>();
-                        g_state.spine.viewer->loadSkeleton(g_state.spine.dictionary, *g_state.browser.data_pack, entries[g_state.spine.selected_index]);
+                        g_state.spine.viewer->loadSkeleton(g_state.spine.catalog, *g_state.browser.data_pack, entries[g_state.spine.selected_index]);
                         g_state.spine.selected_animation = 0;
                         g_state.spine.selected_skin = 0;
                         g_state.spine.last_tick = 0;

@@ -9,7 +9,7 @@
 
 class IArchive;
 struct SpineEntry;
-class SpineDictionary;
+class SpineCatalog;
 
 // Custom texture loader that uses pre-registered GL textures
 class PackTextureLoader : public spine::TextureLoader {
@@ -72,7 +72,7 @@ public:
     SpineViewer();
     ~SpineViewer();
 
-    bool loadSkeleton(const SpineDictionary& dict, IArchive& pack, const SpineEntry& entry);
+    bool loadSkeleton(const SpineCatalog& dict, IArchive& pack, const SpineEntry& entry);
     void unload();
     void update(float deltaTime);
     void render(int viewportWidth, int viewportHeight);
@@ -189,7 +189,7 @@ private:
     SpineBatchRenderer batchRenderer;
 
     // FBO
-    GLuint fbo = 0, fboTexture = 0, fboDepth = 0;
+    GLuint fbo = 0, fboTexture = 0;
     int fboWidth = 0, fboHeight = 0;
 
     float playbackSpeed = 1.0f;

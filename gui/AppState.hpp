@@ -24,7 +24,7 @@
 #include "json.hpp"
 #include "core/Core.hpp"
 #include "archive/IArchive.hpp"
-#include "parsers/SpineDictionary.h"
+#include "parsers/SpineCatalog.hpp"
 
 class SpineViewer;
 
@@ -50,7 +50,6 @@ struct FileBrowserState
     SelectionState<Core::FileNode> selection;
     char search_buffer[256] = {};
     std::string search_query;
-    int click_count = 0;
 };
 
 enum class TaskKind { None, Scan, Extract };
@@ -112,7 +111,6 @@ struct CommonState
 {
     bool show_options = false;
     nk_bool export_sct_as_png = nk_true;
-    bool convert_all_sct = false;
     nk_bool export_db_as_json = nk_true;
     nk_bool enable_open_folder = nk_false;
     bool show_success_popup = false;
@@ -131,7 +129,7 @@ struct CreditsState
 
 struct SpineViewerState
 {
-    SpineDictionary dictionary;
+    SpineCatalog catalog;
     bool show_window = false;
     char search_buffer[256] = {};
     std::string search_query;
@@ -146,15 +144,12 @@ struct SpineViewerState
     std::unordered_set<std::string> expanded_categories, collapsed_bones;
     std::vector<int> visible_indices;
     bool edit_mode = false;
-    float scale_max = 1000.f;
     std::string selected_bone;
-    char scale_max_buffer[16] = "1000";
     bool scroll_to_bone = false;
 
     // Viewport & gizmo state
     bool autoplay = false;
     bool pma_blend = true;
-    bool pma_tex = true;
     int bg_preset = 0; // 0=none, 1=dark, 2=mid, 3=white
     int active_gizmo = 0;
     bool export_pending = false;

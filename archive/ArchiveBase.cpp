@@ -1,10 +1,10 @@
 #include "ArchiveBase.hpp"
 #include "DataPack.hpp"
-#include "SSRArchive.hpp"
+#include "SsraArchive.hpp"
 #include "CompositeArchive.hpp"
-#include "parsers/SCTParser.hpp"
-#include "parsers/DBParser.hpp"
-#include "parsers/SCSPParser.hpp"
+#include "parsers/SctParser.hpp"
+#include "parsers/DbParser.hpp"
+#include "parsers/ScspParser.hpp"
 #include "core/Logger.hpp"
 #include "core/FileTree.hpp"
 #include <filesystem>
@@ -211,7 +211,7 @@ void ArchiveBase::ExtractNode(const Core::FileNode& node, const std::wstring& cu
                     try
                     {
                         LogInfo(std::string("Converting SCT to PNG: ") + node.name);
-                        if (std::vector<uint8_t> png_data = SCTParser::ConvertToPNG(buffer); !png_data.empty())
+                        if (std::vector<uint8_t> png_data = SctParser::ConvertToPng(buffer); !png_data.empty())
                         {
                             buffer = std::move(png_data);
                         }
@@ -256,7 +256,7 @@ void ArchiveBase::ExtractNode(const Core::FileNode& node, const std::wstring& cu
                     try
                     {
                         LogInfo(std::string("Converting DB to JSON: ") + node.name);
-                        std::string json_str = DBParser::ConvertToJson(buffer);
+                        std::string json_str = DbParser::ConvertToJson(buffer);
                         buffer.assign(json_str.begin(), json_str.end());
                     }
                     catch (const std::exception& e)
@@ -270,7 +270,7 @@ void ArchiveBase::ExtractNode(const Core::FileNode& node, const std::wstring& cu
                     try
                     {
                         LogInfo(std::string("Converting SCSP to JSON: ") + node.name);
-                        std::string json_str = SCSPParser::ConvertToJson(buffer);
+                        std::string json_str = ScspParser::ConvertToJson(buffer);
                         buffer.assign(json_str.begin(), json_str.end());
                     }
                     catch (const std::exception& e)
@@ -318,7 +318,7 @@ std::unique_ptr<IArchive> IArchive::Create(const std::wstring& wpath)
     const std::filesystem::path p(wpath);
     if (p.filename() == L"manifest.ssra" || p.extension() == L".ssra")
     {
-        return std::make_unique<SSRArchive>(wpath);
+        return std::make_unique<SsraArchive>(wpath);
     }
     const std::filesystem::path dir = std::filesystem::is_directory(p) ? p : p.parent_path();
 
@@ -333,7 +333,7 @@ std::unique_ptr<IArchive> IArchive::Create(const std::wstring& wpath)
             {
                 if (entry.is_regular_file() && entry.path().filename() == L"manifest.ssra")
                 {
-                    composite->AddArchive(std::make_unique<SSRArchive>(entry.path().wstring()));
+                    composite->AddArchive(std::make_unique<SsraArchive>(entry.path().wstring()));
                 }
             }
         }

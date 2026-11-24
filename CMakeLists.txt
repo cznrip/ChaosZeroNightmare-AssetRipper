@@ -1,8 +1,9 @@
 cmake_minimum_required(VERSION 3.16)
 project(ChaosZeroNightmareRipper LANGUAGES C CXX)
 
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
 
 find_package(SDL2 CONFIG REQUIRED)
 find_package(SDL2_image CONFIG REQUIRED)
@@ -23,13 +24,13 @@ file(GLOB SPINE_CPP_SOURCES "libs/spine-cpp/src/spine/*.cpp")
 
 # Sources shared by the GUI and the headless CLI
 set(CZN_CORE_SOURCES
-        archive/DataPack.cpp
-        archive/ArchiveBase.cpp
-        archive/SSRArchive.cpp
-        archive/CompositeArchive.cpp
-        parsers/SCTParser.cpp
-        parsers/DBParser.cpp
-        parsers/SCSPParser.cpp
+    archive/DataPack.cpp
+    archive/ArchiveBase.cpp
+    archive/SsraArchive.cpp
+    archive/CompositeArchive.cpp
+    parsers/SctParser.cpp
+    parsers/DbParser.cpp
+    parsers/ScspParser.cpp
     libs/zstd/zstddeclib.c
 )
 
@@ -60,8 +61,8 @@ add_executable(
         gui/SpinePanel.cpp
         gui/Toolbar.cpp
     $<TARGET_OBJECTS:czn_core>
-    parsers/SpineDictionary.cpp
-        parsers/SpineRenderer.cpp
+    parsers/SpineCatalog.cpp
+    parsers/SpineRenderer.cpp
     ${SPINE_CPP_SOURCES}
 )
 

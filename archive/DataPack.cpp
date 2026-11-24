@@ -126,14 +126,14 @@ bool DataPack::LoadPackPart(const std::wstring &path)
     part.hFile = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (part.hFile == INVALID_HANDLE_VALUE)
     {
-        LogError("Failed to open file: " + std::filesystem::path(path).u8string());
+        LogError("Failed to open file: " + Core::PathToUtf8(path));
         return false;
     }
 
     LARGE_INTEGER fs;
     if (!GetFileSizeEx(part.hFile, &fs))
     {
-        LogError("Failed to get file size for: " + std::filesystem::path(path).u8string());
+        LogError("Failed to get file size for: " + Core::PathToUtf8(path));
         CloseHandle(part.hFile);
         return false;
     }
@@ -141,7 +141,7 @@ bool DataPack::LoadPackPart(const std::wstring &path)
 
     if (part.fileSize == 0)
     {
-        LogError("Empty file, skipping: " + std::filesystem::path(path).u8string());
+        LogError("Empty file, skipping: " + Core::PathToUtf8(path));
         CloseHandle(part.hFile);
         return false;
     }
@@ -149,7 +149,7 @@ bool DataPack::LoadPackPart(const std::wstring &path)
     part.hMapFile = CreateFileMapping(part.hFile, nullptr, PAGE_READONLY, 0, 0, nullptr);
     if (part.hMapFile == nullptr)
     {
-        LogError("Failed to create file mapping for: " + std::filesystem::path(path).u8string());
+        LogError("Failed to create file mapping for: " + Core::PathToUtf8(path));
         CloseHandle(part.hFile);
         return false;
     }
@@ -236,7 +236,7 @@ DataPack::DataPack(const std::wstring &path)
     const auto packParts = FindPackParts(path);
     if (packParts.empty())
     {
-        LogError("No pack files found: " + std::filesystem::path(path).u8string());
+        LogError("No pack files found: " + Core::PathToUtf8(path));
         return;
     }
 
@@ -245,14 +245,14 @@ DataPack::DataPack(const std::wstring &path)
     {
         if (!LoadPackPart(packPart))
         {
-            LogError("Failed to load pack part: " + std::filesystem::path(packPart).u8string());
+            LogError("Failed to load pack part: " + Core::PathToUtf8(packPart));
             // continue
         }
     }
 
     if (parts.empty())
     {
-        LogError("Failed to load any pack parts from: " + std::filesystem::path(path).u8string());
+        LogError("Failed to load any pack parts from: " + Core::PathToUtf8(path));
         return;
     }
 
@@ -313,7 +313,7 @@ std::vector<uint8_t> DataPack::GetFileData(const Core::FileNode &node)
             }
             else
             {
-                LogError("Could not open local file: " + full_path.u8string());
+                LogError("Could not open local file: " + Core::PathToUtf8(full_path));
             }
         }
         catch (const std::exception &e)
@@ -328,7 +328,7 @@ std::vector<uint8_t> DataPack::GetFileData(const Core::FileNode &node)
     if (static_cast<uint64_t>(info.offset) >= total_file_size ||
         file_end > total_file_size)
     {
-        LogError("Invalid file offset/size for: " + std::filesystem::path(node.name).u8string());
+        LogError("Invalid file offset/size for: " + node.name);
         return data;
     }
 
@@ -338,7 +338,7 @@ std::vector<uint8_t> DataPack::GetFileData(const Core::FileNode &node)
 
         if (const size_t bytes_read = ReadBytes(info.offset, data.data(), info.size); bytes_read != info.size)
         {
-            LogError("Failed to read full file data for: " + std::filesystem::path(node.name).u8string() + " (read " + std::to_string(bytes_read) + " of " + std::to_string(info.size) + ")");
+            LogError("Failed to read full file data for: " + node.name + " (read " + std::to_string(bytes_read) + " of " + std::to_string(info.size) + ")");
             data.clear();
             return data;
         }
@@ -373,7 +373,7 @@ void DataPack::Scan(std::atomic<float> &progress)
     }
     catch (const std::exception &e)
     {
-        LogError("Error during scan: " + std::filesystem::path(e.what()).u8string());
+        LogError("Error during scan: " + std::string(e.what()));
     }
 
     SortTree();
@@ -389,7 +389,7 @@ void DataPack::ScanLocalDirectory(std::atomic<float>& progress)
         if (entry.is_regular_file())
         {
             std::filesystem::path rel_path = std::filesystem::relative(entry.path(), base_path);
-            std::string rel_path_str = rel_path.u8string();
+            std::string rel_path_str = Core::PathToUtf8(rel_path);
             std::replace(rel_path_str.begin(), rel_path_str.end(), '\\', '/');
 
             uint64_t size = entry.file_size();

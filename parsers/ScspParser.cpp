@@ -1,4 +1,4 @@
-#include "SCSPParser.hpp"
+#include "ScspParser.hpp"
 #include "json.hpp"
 #include <stdexcept>
 #include <algorithm>
@@ -2147,13 +2147,13 @@ namespace
     }
 }
 
-std::string SCSPParser::ConvertToJson(const std::vector<uint8_t> &scsp_data)
+std::string ScspParser::ConvertToJson(const std::vector<uint8_t> &scsp_data)
 {
     const auto decompressed = DecompressSCSP(scsp_data);
     return ParseSCSPToJson(decompressed);
 }
 
-SCSPParser::HeaderInfo SCSPParser::ExtractHeader(const std::vector<uint8_t> &scsp_data)
+ScspParser::HeaderInfo ScspParser::ExtractHeader(const std::vector<uint8_t> &scsp_data)
 {
     const auto decompressed = DecompressSCSP(scsp_data);
     if (decompressed.empty())

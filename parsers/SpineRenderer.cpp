@@ -1,9 +1,9 @@
 #define NOMINMAX
 #include "SpineRenderer.hpp"
-#include "SpineDictionary.h"
+#include "SpineCatalog.hpp"
 #include "archive/IArchive.hpp"
-#include "SCSPParser.hpp"
-#include "SCTParser.hpp"
+#include "ScspParser.hpp"
+#include "SctParser.hpp"
 
 #include "core/Logger.hpp"
 #include "json.hpp"
@@ -294,7 +294,7 @@ GLuint SpineViewer::loadTextureFromRGBA(const unsigned char* data, int width, in
     return tex;
 }
 
-bool SpineViewer::loadSkeleton(const SpineDictionary& dict, IArchive& pack, const SpineEntry& entry) {
+bool SpineViewer::loadSkeleton(const SpineCatalog& dict, IArchive& pack, const SpineEntry& entry) {
     unload();
     batchRenderer.init();
 
@@ -305,7 +305,7 @@ bool SpineViewer::loadSkeleton(const SpineDictionary& dict, IArchive& pack, cons
     try {
         std::vector<uint8_t> scspData = pack.GetFileData(*entry.scsp_node);
         if (scspData.empty()) { errorMsg = "Failed to read SCSP file"; LogError("SpineViewer: " + errorMsg); return false; }
-        jsonStr = SCSPParser::ConvertToJson(scspData);
+        jsonStr = ScspParser::ConvertToJson(scspData);
         if (jsonStr.empty()) { errorMsg = "Failed to convert SCSP to JSON"; LogError("SpineViewer: " + errorMsg); return false; }
         originalJson = jsonStr;
     } catch (const std::exception& e) {
@@ -343,7 +343,7 @@ bool SpineViewer::loadSkeleton(const SpineDictionary& dict, IArchive& pack, cons
 
         try {
             if (ext == ".sct" || ext == ".sct2") {
-                auto [data, width, height] = SCTParser::ConvertToRGBA(fileData);
+                auto [data, width, height] = SctParser::ConvertToRgba(fileData);
                 if (data.empty()) { LogError("SpineViewer: SCT decode failed for " + imgNode->name); continue; }
                 w = width; h = height;
                 tex = loadTextureFromRGBA(data.data(), w, h);

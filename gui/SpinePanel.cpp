@@ -14,9 +14,9 @@
 #include "core/Core.hpp"
 #include "core/FileTree.hpp"
 #include "core/DialogPaths.hpp"
-#include "parsers/SCTParser.hpp"
-#include "parsers/SCSPParser.hpp"
-#include "parsers/SpineDictionary.h"
+#include "parsers/SctParser.hpp"
+#include "parsers/ScspParser.hpp"
+#include "parsers/SpineCatalog.hpp"
 #include "gui/AppState.hpp"
 #include "gui/UIHelpers.hpp"
 #include "gui/SpinePanel.hpp"
@@ -156,7 +156,7 @@ namespace {
                         g_state.spine.edit_mode = false;
                         if (!g_state.spine.viewer)
                             g_state.spine.viewer = std::make_unique<SpineViewer>();
-                        g_state.spine.viewer->loadSkeleton(g_state.spine.dictionary, *g_state.browser.data_pack, ent);
+                        g_state.spine.viewer->loadSkeleton(g_state.spine.catalog, *g_state.browser.data_pack, ent);
                         g_state.spine.viewer->setFlipX(g_state.spine.flip_x);
                         g_state.spine.viewer->setFlipY(g_state.spine.flip_y);
                     }
@@ -214,7 +214,7 @@ namespace {
                         g_state.spine.edit_mode = false;
                         if (!g_state.spine.viewer)
                             g_state.spine.viewer = std::make_unique<SpineViewer>();
-                        g_state.spine.viewer->loadSkeleton(g_state.spine.dictionary, *g_state.browser.data_pack, ent);
+                        g_state.spine.viewer->loadSkeleton(g_state.spine.catalog, *g_state.browser.data_pack, ent);
                         g_state.spine.viewer->setFlipX(g_state.spine.flip_x);
                         g_state.spine.viewer->setFlipY(g_state.spine.flip_y);
                     }
@@ -241,14 +241,14 @@ namespace {
             exported++;
         }
 
-        g_state.spine.dictionary.EnsureDetailsLoaded(*g_state.browser.data_pack, entry);
+        g_state.spine.catalog.EnsureDetailsLoaded(*g_state.browser.data_pack, entry);
         for (const auto *img : entry.image_nodes)
         {
             const auto &fi = std::get<Core::FileInfo>(img->data);
             std::vector<uint8_t> data = g_state.browser.data_pack->GetFileData(*img);
             if (is_sct_format(fi.format))
             {
-                std::vector<uint8_t> png_data = SCTParser::ConvertToPNG(data);
+                std::vector<uint8_t> png_data = SctParser::ConvertToPng(data);
                 if (!png_data.empty())
                 {
                     std::string out_name = Core::ReplaceExtension(img->name, ".png");
@@ -295,10 +295,10 @@ void draw_spine_panel(nk_context *ctx, float content_height, int window_width)
         nk_layout_row_dynamic(ctx, 30, 1);
         nk_label(ctx, "Building Spine dictionary...", NK_TEXT_CENTERED);
     }
-    else if (g_state.spine.dictionary.IsBuilt())
+    else if (g_state.spine.catalog.IsBuilt())
     {
-        const auto &spine_entries_inline = g_state.spine.dictionary.GetEntries();
-        const auto &root_cat = g_state.spine.dictionary.GetRootCategory();
+        const auto &spine_entries_inline = g_state.spine.catalog.GetEntries();
+        const auto &root_cat = g_state.spine.catalog.GetRootCategory();
 
         nk_layout_row_begin(ctx, NK_STATIC, 28, 3);
         nk_layout_row_push(ctx, 60);
@@ -508,7 +508,7 @@ void draw_spine_panel(nk_context *ctx, float content_height, int window_width)
                                 int exported = 0;
                                 {
                                     std::vector<uint8_t> data = g_state.browser.data_pack->GetFileData(*entry.scsp_node);
-                                    std::string json_str = SCSPParser::ConvertToJson(data);
+                                    std::string json_str = ScspParser::ConvertToJson(data);
                                     if (!json_str.empty())
                                     {
                                         try
@@ -577,7 +577,7 @@ void draw_spine_panel(nk_context *ctx, float content_height, int window_width)
                         g_state.spine.viewer->setPremultiplyTextures(false);
                         if (g_state.spine.selected_index >= 0 && g_state.spine.selected_index < static_cast<int>(spine_entries_inline.size()))
                         {
-                            g_state.spine.viewer->loadSkeleton(g_state.spine.dictionary, *g_state.browser.data_pack, spine_entries_inline[g_state.spine.selected_index]);
+                            g_state.spine.viewer->loadSkeleton(g_state.spine.catalog, *g_state.browser.data_pack, spine_entries_inline[g_state.spine.selected_index]);
                         }
                     }
                 }

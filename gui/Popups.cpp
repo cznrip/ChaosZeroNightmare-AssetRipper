@@ -4,6 +4,7 @@
 #include "gui/Popups.hpp"
 #include "gui/PreviewPanel.hpp"
 #include "gui/UIHelpers.hpp"
+#include "core/AppInfo.hpp"
 #include "core/RipperOptions.hpp"
 #include "core/DialogPaths.hpp"
 
@@ -154,7 +155,7 @@ void draw_credits_popup(nk_context *ctx, const int window_width, const int windo
         nk_begin(ctx, "Credits", nk_rect(credits_options_x, credits_options_y, credits_options_width, credits_options_height),NK_WINDOW_BORDER | NK_WINDOW_MOVABLE | NK_WINDOW_CLOSABLE | NK_WINDOW_TITLE))
     {
         nk_layout_row_dynamic(ctx, 30, 1);
-        nk_label(ctx, "Chaos Zero Nightmare ASSet Ripper v1.4.0", NK_TEXT_CENTERED);
+        nk_label(ctx, AppInfo::WindowTitle, NK_TEXT_CENTERED);
         nk_label(ctx, "by @akioukun (github.com/akioukun)", NK_TEXT_CENTERED);
         nk_layout_row_dynamic(ctx, 20, 1);
         nk_label(ctx, "", NK_TEXT_LEFT);

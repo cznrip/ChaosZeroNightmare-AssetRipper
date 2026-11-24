@@ -1,5 +1,5 @@
 #include "parsers/SpineRenderer.hpp"
-#include "parsers/SpineDictionary.h"
+#include "parsers/SpineCatalog.hpp"
 #include "gui/AppState.hpp"
 #include "gui/PreviewPanel.hpp"
 
@@ -18,7 +18,7 @@ void reset_app_state()
     memset(g_state.database.search_buffer, 0, sizeof(g_state.database.search_buffer));
     if (g_state.spine.build_future.valid())
         g_state.spine.build_future.wait();
-    g_state.spine.dictionary.Clear();
+    g_state.spine.catalog.Clear();
     g_state.spine.show_window = false;
     g_state.spine.selected_index = -1;
     memset(g_state.spine.search_buffer, 0, sizeof(g_state.spine.search_buffer));

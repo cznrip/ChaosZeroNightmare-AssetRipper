@@ -1,4 +1,4 @@
-#include "SCTParser.hpp"
+#include "SctParser.hpp"
 #include <iostream>
 #include <map>
 #include <algorithm>
@@ -437,7 +437,7 @@ namespace {
     }
 }
 
-SCTParser::RGBAImage SCTParser::ConvertToRGBA(const std::vector<uint8_t>& data) {
+SctParser::RgbaImage SctParser::ConvertToRgba(const std::vector<uint8_t>& data) {
     try {
         Format format_type = DetectFormat(data);
         Header header;
@@ -529,20 +529,20 @@ SCTParser::RGBAImage SCTParser::ConvertToRGBA(const std::vector<uint8_t>& data) 
             return {};
         }
 
-        RGBAImage result;
+        RgbaImage result;
         result.data = std::move(final_rgba_data);
         result.width = width;
         result.height = height;
         return result;
     }
     catch (const std::exception& e) {
-        LogError(std::string("SCT ConvertToRGBA exception: ") + e.what());
+        LogError(std::string("SCT ConvertToRgba exception: ") + e.what());
         return {};
     }
 }
 
-std::vector<uint8_t> SCTParser::ConvertToPNG(const std::vector<uint8_t>& data) {
-    auto [image, width, height] = ConvertToRGBA(data);
+std::vector<uint8_t> SctParser::ConvertToPng(const std::vector<uint8_t>& data) {
+    auto [image, width, height] = ConvertToRgba(data);
     if (image.empty()) return {};
 
     std::vector<uint8_t> png_data;

@@ -5,7 +5,7 @@
 #include <unordered_map>
 #include <map>
 #include <cstdint>
-#include "SCSPParser.hpp"
+#include "ScspParser.hpp"
 
 class IArchive;
 
@@ -18,7 +18,7 @@ struct SpineEntry {
     mutable std::vector<const Core::FileNode*> image_nodes; // texture images referenced by atlas
 
     // Header info extracted from .scsp
-    mutable SCSPParser::HeaderInfo header_info;
+    mutable ScspParser::HeaderInfo header_info;
     mutable bool details_loaded = false;
 };
 
@@ -29,7 +29,7 @@ struct SpineCategory {
     std::map<std::string, SpineCategory> subcategories;
 };
 
-class SpineDictionary {
+class SpineCatalog {
 public:
     void Build(IArchive& pack, const Core::FileNode& root);
     void Clear();

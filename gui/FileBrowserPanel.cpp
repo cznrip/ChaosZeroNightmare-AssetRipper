@@ -1,6 +1,7 @@
 #include "gui/FileBrowserPanel.hpp"
 #include "gui/PreviewPanel.hpp"
 #include "gui/UIHelpers.hpp"
+#include "core/AppInfo.hpp"
 #include "core/Core.hpp"
 #include "core/FileTree.hpp"
 #include "core/DialogPaths.hpp"
@@ -16,7 +17,7 @@
 #include <vector>
 
 namespace {
-    constexpr auto FILEMAP_GENERATOR_ID = "Chaos-Zero-Nightmare-ASSet-Ripper";
+    constexpr auto FILEMAP_GENERATOR_ID = AppInfo::FileMapGeneratorId;
 
     template <typename NodeT, typename SetT>
     void update_multi_selection(const bool ctrl, SetT &selected_nodes, const NodeT *&selected_node, const NodeT *node)
@@ -568,7 +569,6 @@ void handle_node_click(const Core::FileNode *node, const bool is_folder)
         return;
     }
 
-    g_state.browser.click_count = 0;
     update_multi_selection(ctrl_pressed, g_state.browser.selection.selected_nodes, g_state.browser.selection.selected_node, node);
 
     if (!is_folder)

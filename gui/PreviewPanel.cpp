@@ -3,9 +3,9 @@
 #include "gui/UIHelpers.hpp"
 #include "core/Core.hpp"
 #include "core/FileTree.hpp"
-#include "parsers/SCTParser.hpp"
-#include "parsers/DBParser.hpp"
-#include "parsers/SCSPParser.hpp"
+#include "parsers/SctParser.hpp"
+#include "parsers/DbParser.hpp"
+#include "parsers/ScspParser.hpp"
 #include "core/DialogPaths.hpp"
 
 #include <GL/glew.h>
@@ -75,7 +75,7 @@ namespace {
                 return;
             }
 
-            std::string json_str = DBParser::ConvertToJson(file_data);
+            std::string json_str = DbParser::ConvertToJson(file_data);
             if (json_str.empty() || json_str == "{}")
             {
                 g_state.preview.text_full = json_str;
@@ -177,7 +177,7 @@ namespace {
                 return;
             }
 
-            if (std::string json_str = SCSPParser::ConvertToJson(file_data); !json_str.empty())
+            if (std::string json_str = ScspParser::ConvertToJson(file_data); !json_str.empty())
             {
                 try
                 {
@@ -258,7 +258,7 @@ namespace {
         {
             try
             {
-                std::vector<uint8_t> png_data = SCTParser::ConvertToPNG(file_data);
+                std::vector<uint8_t> png_data = SctParser::ConvertToPng(file_data);
                 if (png_data.empty())
                 {
                     out_error = "Failed to convert SCT/SCT2 file";
@@ -442,7 +442,6 @@ void clear_preview()
     g_state.preview.error = "";
     g_state.preview.text_preview = "";
     g_state.preview.text_full = "";
-    g_state.preview.text_full = "";
     g_state.database.column_names.clear();
     g_state.database.rows.clear();
     g_state.preview.mode = PreviewMode::None;
@@ -608,7 +607,7 @@ void export_file_as_png(const Core::FileNode &node)
 
             if (is_sct_format(info.format))
             {
-                png_data = SCTParser::ConvertToPNG(file_data);
+                png_data = SctParser::ConvertToPng(file_data);
             }
             else
             {
@@ -651,12 +650,12 @@ void export_file_as_sct(const Core::FileNode &node)
 
 void export_db_as_json_file(const Core::FileNode &node)
 {
-    export_json_file(node, "Export DB as JSON", "DB", DBParser::ConvertToJson);
+    export_json_file(node, "Export DB as JSON", "DB", DbParser::ConvertToJson);
 }
 
 void export_scsp_as_json_file(const Core::FileNode &node)
 {
-    export_json_file(node, "Export SCSP as JSON", "SCSP", SCSPParser::ConvertToJson);
+    export_json_file(node, "Export SCSP as JSON", "SCSP", ScspParser::ConvertToJson);
 }
 
 void draw_preview_panel(nk_context *ctx, float right_width, float content_height)

@@ -3,8 +3,7 @@
 #include <string>
 #include <cstdint>
 
-namespace DBParser
+namespace DbParser
 {
     std::string ConvertToJson(const std::vector<uint8_t> &data);
-    bool ConvertToJsonToStream(const std::vector<uint8_t>& data, std::ostream& out) noexcept;
 }

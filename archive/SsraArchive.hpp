@@ -4,10 +4,10 @@
 #include <vector>
 #include <map>
 
-class SSRArchive : public ArchiveBase {
+class SsraArchive : public ArchiveBase {
 public:
-    explicit SSRArchive(const std::wstring& manifest_path);
-    ~SSRArchive() override = default;
+    explicit SsraArchive(const std::wstring& manifest_path);
+    ~SsraArchive() override = default;
 
     void Scan(std::atomic<float>& progress) override;
     std::vector<uint8_t> GetFileData(const Core::FileNode& node) override;

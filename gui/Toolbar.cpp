@@ -145,13 +145,13 @@ void draw_toolbar(nk_context *ctx)
     {
         if (!g_state.spine.show_window)
         {
-            if (!g_state.spine.dictionary.IsBuilt() && !g_state.spine.building)
+            if (!g_state.spine.catalog.IsBuilt() && !g_state.spine.building)
             {
                 g_state.spine.building = true;
                 g_state.spine.build_future = std::async(std::launch::async, []()
                                                         {
                             try {
-                                g_state.spine.dictionary.Build(*g_state.browser.data_pack, g_state.browser.data_pack->GetFileTree());
+                                g_state.spine.catalog.Build(*g_state.browser.data_pack, g_state.browser.data_pack->GetFileTree());
                             } catch (...) {}
                             g_state.spine.building = false; });
             }

@@ -1,6 +1,6 @@
-#include "SpineDictionary.h"
+#include "SpineCatalog.hpp"
 #include "archive/IArchive.hpp"
-#include "SCSPParser.hpp"
+#include "ScspParser.hpp"
 #include "core/Logger.hpp"
 #include <algorithm>
 #include <sstream>
@@ -88,7 +88,7 @@ namespace {
     }
 }
 
-void SpineDictionary::Clear() {
+void SpineCatalog::Clear() {
     entries.clear();
     root_category.subcategories.clear();
     root_category.entry_indices.clear();
@@ -98,7 +98,7 @@ void SpineDictionary::Clear() {
     built = false;
 }
 
-void SpineDictionary::CollectFiles(const Core::FileNode& node) {
+void SpineCatalog::CollectFiles(const Core::FileNode& node) {
     if (std::holds_alternative<Core::FileInfo>(node.data)) {
         const std::string path = normalize_path(node.full_path);
         const std::string ext = get_extension(node.name);
@@ -117,14 +117,14 @@ void SpineDictionary::CollectFiles(const Core::FileNode& node) {
     }
 }
 
-const Core::FileNode* SpineDictionary::FindSiblingByName(const std::string& scsp_path, const std::string& filename) {
+const Core::FileNode* SpineCatalog::FindSiblingByName(const std::string& scsp_path, const std::string& filename) {
     const std::string dir = get_directory(scsp_path);
     const std::string target = dir.empty() ? filename : dir + "/" + filename;
     if (const auto it = all_files.find(normalize_path(target)); it != all_files.end()) return it->second;
     return nullptr;
 }
 
-std::vector<std::string> SpineDictionary::ParseAtlasTextureNames(const std::vector<uint8_t>& atlas_data) {
+std::vector<std::string> SpineCatalog::ParseAtlasTextureNames(const std::vector<uint8_t>& atlas_data) {
     std::vector<std::string> textures;
     const std::string content(atlas_data.begin(), atlas_data.end());
     std::istringstream ss(content);
@@ -151,7 +151,7 @@ std::vector<std::string> SpineDictionary::ParseAtlasTextureNames(const std::vect
     return textures;
 }
 
-void SpineDictionary::MatchEntries() {
+void SpineCatalog::MatchEntries() {
     int skipped_no_atlas = 0;
 
     std::unordered_map<std::string, std::vector<const Core::FileNode*>> atlases_by_dir;
@@ -192,7 +192,7 @@ void SpineDictionary::MatchEntries() {
         entries.push_back(std::move(entry));
     }
 
-    LogInfo("SpineDictionary: " + std::to_string(entries.size()) + " entries with atlas, " + std::to_string(skipped_no_atlas) + " skipped (no atlas)");
+    LogInfo("SpineCatalog: " + std::to_string(entries.size()) + " entries with atlas, " + std::to_string(skipped_no_atlas) + " skipped (no atlas)");
 
     std::sort(entries.begin(), entries.end(),
     [](const SpineEntry& a, const SpineEntry& b) {
@@ -201,13 +201,13 @@ void SpineDictionary::MatchEntries() {
     });
 }
 
-void SpineDictionary::EnsureDetailsLoaded(IArchive& pack, const SpineEntry& entry) const {
+void SpineCatalog::EnsureDetailsLoaded(IArchive& pack, const SpineEntry& entry) const {
     if (entry.details_loaded) return;
     entry.details_loaded = true;
 
     try {
         if (std::vector<uint8_t> data = pack.GetFileData(*entry.scsp_node); !data.empty()) {
-            SCSPParser::HeaderInfo hdr = SCSPParser::ExtractHeader(data);
+            ScspParser::HeaderInfo hdr = ScspParser::ExtractHeader(data);
             entry.header_info = hdr;
         }
     } catch (...) {}
@@ -243,7 +243,7 @@ void SpineDictionary::EnsureDetailsLoaded(IArchive& pack, const SpineEntry& entr
     } catch (...) {}
 }
 
-void SpineDictionary::BuildCategories() {
+void SpineCatalog::BuildCategories() {
     root_category.name = "Root";
     root_category.full_path = "";
     root_category.entry_indices.clear();
@@ -272,15 +272,15 @@ void SpineDictionary::BuildCategories() {
     }
 }
 
-void SpineDictionary::Build(IArchive& pack, const Core::FileNode& root) {
+void SpineCatalog::Build(IArchive& pack, const Core::FileNode& root) {
     Clear();
-    LogInfo("SpineDictionary: scanning file tree...");
+    LogInfo("SpineCatalog: scanning file tree...");
     CollectFiles(root);
-    LogInfo("SpineDictionary: found " + std::to_string(scsp_files.size()) + " .scsp, "
+    LogInfo("SpineCatalog: found " + std::to_string(scsp_files.size()) + " .scsp, "
             + std::to_string(atlas_files.size()) + " .atlas, "
             + std::to_string(all_files.size()) + " total files");
     MatchEntries();
     BuildCategories();
-    LogInfo("SpineDictionary: built tree successfully");
+    LogInfo("SpineCatalog: built tree successfully");
     built = true;
 }

@@ -3,7 +3,7 @@
 #include <cstdint>
 #include <string>
 
-namespace SCSPParser {
+namespace ScspParser {
     std::string ConvertToJson(const std::vector<uint8_t>& scsp_data);
 
     struct HeaderInfo {

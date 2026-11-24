@@ -1,4 +1,4 @@
-#include "SSRArchive.hpp"
+#include "SsraArchive.hpp"
 #include "core/Logger.hpp"
 #include "core/Core.hpp"
 #include "libs/zstd/zstd.h"
@@ -65,7 +65,7 @@ namespace {
 #pragma pack(pop)
 }
 
-SSRArchive::SSRArchive(const std::wstring& manifest_path) : manifest_path(manifest_path)
+SsraArchive::SsraArchive(const std::wstring& manifest_path) : manifest_path(manifest_path)
 {
     this->pack_path = manifest_path;
     this->type = PackType::SSRA;
@@ -73,7 +73,7 @@ SSRArchive::SSRArchive(const std::wstring& manifest_path) : manifest_path(manife
     chunks_dir = (p.parent_path() / L"chunks").wstring();
 }
 
-std::string SSRArchive::GetStringFromTable(const std::vector<uint8_t>& string_table, const uint64_t offset)
+std::string SsraArchive::GetStringFromTable(const std::vector<uint8_t>& string_table, const uint64_t offset)
 {
     if (offset >= string_table.size())
         return {};
@@ -86,7 +86,7 @@ std::string SSRArchive::GetStringFromTable(const std::vector<uint8_t>& string_ta
     return std::string(str_ptr, len);
 }
 
-void SSRArchive::Scan(std::atomic<float>& progress)
+void SsraArchive::Scan(std::atomic<float>& progress)
 {
     LogInfo("Scanning SSRA manifest: " + Core::WStringToUtf8(manifest_path));
 
@@ -325,7 +325,7 @@ void SSRArchive::Scan(std::atomic<float>& progress)
     progress = 1.0f;
 }
 
-std::vector<uint8_t> SSRArchive::GetFileData(const Core::FileNode& node)
+std::vector<uint8_t> SsraArchive::GetFileData(const Core::FileNode& node)
 {
     if (!std::holds_alternative<Core::FileInfo>(node.data)) {
         return {};

@@ -1,4 +1,4 @@
-#include "DBParser.hpp"
+#include "DbParser.hpp"
 #include <vector>
 #include <string>
 #include <sstream>
@@ -77,7 +77,7 @@ namespace
     }
 }
 
-std::string DBParser::ConvertToJson(const std::vector<uint8_t> &data)
+std::string DbParser::ConvertToJson(const std::vector<uint8_t> &data)
 {
     try {
         std::vector<uint8_t> decrypted = DecryptDB(data);
@@ -267,122 +267,5 @@ std::string DBParser::ConvertToJson(const std::vector<uint8_t> &data)
         return "{}";
     } catch (...) {
         return "{}";
-    }
-}
-
-bool DBParser::ConvertToJsonToStream(const std::vector<uint8_t>& data, std::ostream& out) noexcept
-{
-    try {
-        LogInfo("DB ConvertToJsonToStream begin");
-        std::vector<uint8_t> decrypted = DecryptDB(data);
-        size_t pos = 0;
-        std::map<std::string, std::vector<uint8_t>> entries;
-        Header header;
-
-        if (decrypted.size() < 0x26) { LogError("DB decrypted too small"); return false; }
-
-        header.magic.assign(decrypted.begin() + pos, decrypted.begin() + pos + 5);
-        pos += 5;
-        header.version = decrypted[pos++];
-        header.headerSize = *reinterpret_cast<const uint16_t *>(&decrypted[pos]);
-        pos += 2;
-        if (header.headerSize != 0x26) { LogError("DB invalid header size"); return false; }
-        header.unk = decrypted[pos++];
-        header.unk1 = *reinterpret_cast<const uint64_t *>(&decrypted[pos]);
-        pos += 8;
-        header.defaultFileCount = *reinterpret_cast<const uint32_t *>(&decrypted[pos]);
-        pos += 4;
-        header.hashTableCount = *reinterpret_cast<const uint32_t *>(&decrypted[pos]);
-        pos += 4;
-        {
-            uint8_t offsetHi = decrypted[pos++];
-            uint32_t offsetLo = *reinterpret_cast<const uint32_t *>(&decrypted[pos]);
-            pos += 4;
-            header.hashTableOffset = offsetLo + (static_cast<uint64_t>(offsetHi) << 32);
-        }
-        header.unk5 = *reinterpret_cast<const uint64_t *>(&decrypted[pos]);
-        pos += 8;
-        pos = header.hashTableOffset;
-
-        std::vector rootEntry(decrypted.begin() + pos, decrypted.begin() + pos + 5);
-        pos += 5;
-        if (rootEntry[4] != 1) { LogError("DB rootEntry invalid"); return false; }
-        if (uint32_t rootSize = *reinterpret_cast<const uint32_t *>(&rootEntry[0]); rootSize != 5 * (header.hashTableCount + 1)) { LogError("DB rootSize mismatch"); return false; }
-
-        std::vector<HashTableEntry> hashTableEntries;
-        for (uint32_t i = 0; i < header.hashTableCount; i++) {
-            uint8_t entryHi = decrypted[pos++];
-            uint32_t entryLo = *reinterpret_cast<const uint32_t *>(&decrypted[pos]);
-            pos += 4;
-            HashTableEntry entry{};
-            entry.entryOffset = entryLo + (static_cast<uint64_t>(entryHi) << 32);
-            hashTableEntries.push_back(entry);
-
-            if (entry.entryOffset != 0) {
-                size_t currentPos = entry.entryOffset;
-                while (true) {
-                    FileChunkHeader chunk{};
-                    chunk.entrySize = *reinterpret_cast<const uint32_t *>(&decrypted[currentPos]);
-                    currentPos += 4;
-                    chunk.entryType = decrypted[currentPos++];
-                    chunk.fileNameLength = decrypted[currentPos++];
-                    chunk.fileSize = *reinterpret_cast<const uint32_t *>(&decrypted[currentPos]);
-                    currentPos += 4;
-                    uint8_t nextEntryHi = decrypted[currentPos++];
-                    uint32_t nextEntryLo = *reinterpret_cast<const uint32_t *>(&decrypted[currentPos]);
-                    currentPos += 4;
-                    chunk.nextEntry = nextEntryLo + (static_cast<uint64_t>(nextEntryHi) << 32);
-                    std::string fileName(reinterpret_cast<const char *>(&decrypted[currentPos]), chunk.fileNameLength);
-                    currentPos += chunk.fileNameLength;
-                    std::vector fileData(decrypted.begin() + currentPos, decrypted.begin() + currentPos + chunk.fileSize);
-                    currentPos += chunk.fileSize;
-                    entries[fileName] = std::move(fileData);
-                    if (chunk.nextEntry == 0) break;
-                    currentPos = chunk.nextEntry;
-                }
-            }
-        }
-
-        uint32_t rows = 0, cols = 0;
-        std::vector<std::string> colNames;
-        if (auto rowsIt = entries.find("\trows"); rowsIt != entries.end() && !rowsIt->second.empty()) rows = *reinterpret_cast<const uint32_t *>(rowsIt->second.data());
-        if (auto colsIt = entries.find("\tcols"); colsIt != entries.end() && !colsIt->second.empty()) cols = *reinterpret_cast<const uint32_t *>(colsIt->second.data());
-        for (uint32_t col = 0; col < cols; col++) {
-            std::string key = "\t" + std::to_string(col);
-            if (auto it = entries.find(key); it != entries.end()) colNames.emplace_back(it->second.begin(), it->second.end());
-        }
-
-        // Build final JSON
-        json root_json = json::array();
-
-        for (uint32_t row = 0; row < rows; row++) {
-            if ((row % 1000) == 0) LogInfo(std::string("DB JSON rows written: ") + std::to_string(row));
-            std::string entryKey = "\t\t" + std::to_string(row);
-            if (auto entryIt = entries.find(entryKey); entryIt != entries.end()) {
-                if (auto actualEntryIt = entries.find(std::string(entryIt->second.begin(), entryIt->second.end())); actualEntryIt != entries.end()) {
-                    std::vector<std::string> values;
-                    size_t start = 0;
-                    for (size_t i = 0; i < actualEntryIt->second.size(); i++) {
-                        if (actualEntryIt->second[i] == 0) {
-                            values.emplace_back(actualEntryIt->second.begin() + start, actualEntryIt->second.begin() + i);
-                            start = i + 1;
-                        }
-                    }
-
-                    json row_obj = json::object();
-                    for (size_t i = 0; i < colNames.size() && i < values.size(); i++) {
-                        row_obj[colNames[i]] = values[i];
-                    }
-                    root_json.push_back(row_obj);
-                }
-            }
-        }
-
-        out << root_json.dump(2, ' ', false);
-        LogInfo("DB ConvertToJsonToStream end");
-        return true;
-    } catch (...) {
-        LogError("DB ConvertToJsonToStream exception");
-        return false;
     }
 }
