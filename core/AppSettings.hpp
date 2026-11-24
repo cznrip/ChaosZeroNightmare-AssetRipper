@@ -20,10 +20,6 @@ namespace Core {
         std::string last_export_dir;
     };
 
-    /**
-     * Cached in-memory application settings backed by czn_ripper.ini.
-     * Avoids re-parsing the INI file on every file dialog open/close.
-     */
     class AppSettings {
     public:
         static AppSettings& Instance();

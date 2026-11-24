@@ -8,7 +8,7 @@
 namespace Core {
 
     namespace {
-        bool ParseBool(std::string_view value, bool default_value) {
+        bool ParseBool(const std::string_view value, const bool default_value) {
             const std::string normalized = ToLower(Trim(value));
             if (normalized == "1" || normalized == "true") return true;
             if (normalized == "0" || normalized == "false") return false;
@@ -79,7 +79,7 @@ namespace Core {
         out.flush();
     }
 
-    std::string& AppSettings::SlotRef(DialogSlot slot) noexcept {
+    std::string& AppSettings::SlotRef(const DialogSlot slot) noexcept {
         switch (slot) {
             case DialogSlot::Extract: return m_options.last_extract_dir;
             case DialogSlot::Export:  return m_options.last_export_dir;
@@ -88,7 +88,7 @@ namespace Core {
         }
     }
 
-    const std::string& AppSettings::SlotRef(DialogSlot slot) const noexcept {
+    const std::string& AppSettings::SlotRef(const DialogSlot slot) const noexcept {
         switch (slot) {
             case DialogSlot::Extract: return m_options.last_extract_dir;
             case DialogSlot::Export:  return m_options.last_export_dir;
@@ -97,18 +97,18 @@ namespace Core {
         }
     }
 
-    std::string AppSettings::GetRememberedDir(DialogSlot slot) const {
+    std::string AppSettings::GetRememberedDir(const DialogSlot slot) const {
         const std::string& stored = SlotRef(slot);
         if (stored.empty()) return {};
 
-        std::error_code ec;
-        if (!std::filesystem::is_directory(std::filesystem::path(Utf8ToWString(stored)), ec)) {
+        std::error_code error_code;
+        if (!std::filesystem::is_directory(std::filesystem::path(Utf8ToWString(stored)), error_code)) {
             return {};
         }
         return stored;
     }
 
-    void AppSettings::RememberDir(DialogSlot slot, std::string_view dir) {
+    void AppSettings::RememberDir(const DialogSlot slot, const std::string_view dir) {
         if (dir.empty()) return;
         std::string& stored = SlotRef(slot);
         if (stored == dir) return;
@@ -116,7 +116,7 @@ namespace Core {
         Save();
     }
 
-    void AppSettings::RememberParentOf(DialogSlot slot, std::string_view file_path) {
+    void AppSettings::RememberParentOf(const DialogSlot slot, const std::string_view file_path) {
         if (file_path.empty()) return;
         const std::filesystem::path parent = std::filesystem::path(Utf8ToWString(file_path)).parent_path();
         if (!parent.empty()) {

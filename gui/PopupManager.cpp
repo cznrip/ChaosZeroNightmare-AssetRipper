@@ -94,13 +94,13 @@ void PopupManager::RenderCreditsPopup(nk_context* ctx, int window_width, int win
     {
         nk_layout_row_dynamic(ctx, 30, 1);
         nk_label(ctx, AppInfo::WindowTitle, NK_TEXT_CENTERED);
-        nk_label(ctx, "by @akioukun (github.com/akioukun)", NK_TEXT_CENTERED);
+        nk_label(ctx, "by @formagGino (github.com/formagGinoo)", NK_TEXT_CENTERED);
+        nk_label(ctx, "and @akioukun (github.com/akioukun)", NK_TEXT_CENTERED);
 
         nk_layout_row_dynamic(ctx, 20, 1);
         nk_label(ctx, "", NK_TEXT_LEFT);
         nk_label(ctx, "made with nuklear, sdl2/opengl, portable-file-dialogs", NK_TEXT_CENTERED);
         nk_label(ctx, "SCT/SCT2 support with astcenc & etcdec", NK_TEXT_CENTERED);
-        nk_label(ctx, "big thanks to @formagGino (github.com/formagGinoo) for SCT Parser, DB Parser and SCSP Parser", NK_TEXT_CENTERED);
         nk_label(ctx, "thanks to @LukeFZ (github.com/LukeFZ) for DB decryption logic", NK_TEXT_CENTERED);
         nk_label(ctx, "thanks to @lIllIIlI (github.com/lIllIIlI) for SpineViewer logic", NK_TEXT_CENTERED);
 
